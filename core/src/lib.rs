@@ -16,6 +16,9 @@ pub mod find;
 pub mod format;
 pub mod index;
 pub mod source;
+/// Syntax highlighting with syntect, behind the `syntax` feature.
+#[cfg(feature = "syntax")]
+pub mod syntax;
 
 pub use document::Document;
 pub use find::{Find, FindStep, Needle};

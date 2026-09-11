@@ -35,9 +35,15 @@ index instead of the lines, and show the file before it has been counted.
   none, it is two spaces, LF and a final newline. The editor's tab stops come
   from the same place: `tab_width`, or a numeric `indent_size`, and every four
   columns otherwise.
-- **Highlighting is line-local** for logs, JSON, XML and CSV, and grammar
-  based with state snapshots every few thousand lines for code, the same trick
-  as the line index.
+- **Highlighting is syntect's**, with the Sublime Text grammars `bat` uses and
+  the `base16-ocean.dark` theme. The grammars load on a thread, and only for a
+  file that has one: a log never pays for them. A grammar carries state from
+  line to line, so the state is kept every 512 lines by a parse from the top
+  in the background, the same trick as the line index. A line that parse has
+  not reached is coloured from 256 lines above it, which is right unless a
+  comment or string opened further up, and is put right when the parse gets
+  there. Files over 16 MB are only ever coloured that way, and a line longer
+  than 16 KB is left uncoloured.
 
 ## Layout
 
@@ -77,8 +83,8 @@ cargo run --release -- --format dump.json pretty.json          # no window: pret
 
 1. An open dialog.
 2. IME composition forwarded from winit into the text area.
-3. Highlighting: line-local rules first, then `syntect` with state snapshots,
-   through the widget's `spans` hook.
+3. Highlighting for logs, which syntect has no grammar for: ctail's line-local
+   rules, through the same `spans` hook.
 4. Conflict detection when the file changes underneath.
 5. Long lines: a single-line multi-gigabyte JSON still has to be formatted
    before it can be paged through; chunked lines would let it be read as is.

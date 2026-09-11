@@ -5,13 +5,16 @@
 //! the other, keeps the last I/O error for the status bar, and holds the path
 //! the document came from so it can go back there.
 
-use denise_ui::widgets::{Pos, TextDocument};
+use denise::Color;
+use denise_ui::widgets::{Pos, Span, TextDocument};
 use squint_core::format::{Format, Kind, Style};
+use squint_core::syntax::{self, Run, Syntax};
 use squint_core::{Document, Find, FindStep, Needle};
 use std::borrow::Cow;
 use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 pub struct FileDocument {
     doc: Document,
@@ -20,6 +23,13 @@ pub struct FileDocument {
     error: Option<String>,
     /// What to mark on the lines on screen: the query being found.
     highlight: Option<Needle>,
+    /// The grammar colouring the text, once one is decided on.
+    syntax: Option<Syntax>,
+    /// Whether the grammar has been decided on, which waits for the grammars
+    /// to load.
+    syntax_decided: bool,
+    /// Runs asked for, kept so a paint does not allocate a vector per line.
+    runs: Vec<Run>,
 }
 
 impl FileDocument {
@@ -29,6 +39,9 @@ impl FileDocument {
             path: Some(path.to_path_buf()),
             error: None,
             highlight: None,
+            syntax: None,
+            syntax_decided: false,
+            runs: Vec::new(),
         })
     }
 
@@ -38,6 +51,63 @@ impl FileDocument {
             path: None,
             error: None,
             highlight: None,
+            syntax: None,
+            syntax_decided: true,
+            runs: Vec::new(),
+        }
+    }
+
+    /// Decides on a grammar, once the grammars are loaded — starting their
+    /// load if this file is worth it. Returns whether the text is coloured
+    /// now, so the caller can say so.
+    pub fn decide_syntax(&mut self) -> bool {
+        if self.syntax_decided {
+            return false;
+        }
+        let head = self.head(8192);
+        if !syntax::worth_loading(self.path.as_deref(), &head) {
+            self.syntax_decided = true;
+            return false;
+        }
+        if !syntax::is_loaded() {
+            syntax::load_in_background();
+            return false;
+        }
+        self.syntax_decided = true;
+        self.syntax = Syntax::detect(self.path.as_deref(), &head);
+        self.syntax.is_some()
+    }
+
+    /// Whether a grammar is still to be decided on.
+    pub fn syntax_undecided(&self) -> bool {
+        !self.syntax_decided
+    }
+
+    /// The grammar colouring the text: `JSON`, `Rust`.
+    pub fn syntax_name(&self) -> Option<&str> {
+        self.syntax.as_ref().map(Syntax::name)
+    }
+
+    /// Whether the parse from the top has work left.
+    pub fn highlighting(&self) -> bool {
+        self.syntax.as_ref().is_some_and(|s| !s.is_settled())
+    }
+
+    /// Parses on from the top until `deadline`. An I/O error turns the
+    /// colouring off and is kept for the status line.
+    pub fn highlight_until(&mut self, deadline: Instant) {
+        if let Some(syntax) = &mut self.syntax
+            && let Err(e) = syntax.advance(&mut self.doc, deadline)
+        {
+            self.error = Some(format!("highlighting: {e}"));
+            self.syntax = None;
+        }
+    }
+
+    /// The text changed from `line` on.
+    fn changed_from(&mut self, line: usize) {
+        if let Some(syntax) = &mut self.syntax {
+            syntax.invalidate_from(line as u64);
         }
     }
 
@@ -183,6 +253,7 @@ impl TextDocument for FileDocument {
         {
             self.error = Some(e.to_string());
         }
+        self.changed_from(at.line);
     }
 
     fn delete(&mut self, from: Pos, to: Pos) {
@@ -194,14 +265,40 @@ impl TextDocument for FileDocument {
         {
             self.error = Some(e.to_string());
         }
+        self.changed_from(from.line);
     }
 
+    // Undo and redo do not say where the text changed, so all of it may have.
     fn undo(&mut self) -> bool {
-        self.doc.undo()
+        let undone = self.doc.undo();
+        if undone {
+            self.changed_from(0);
+        }
+        undone
     }
 
     fn redo(&mut self) -> bool {
-        self.doc.redo()
+        let redone = self.doc.redo();
+        if redone {
+            self.changed_from(0);
+        }
+        redone
+    }
+
+    fn spans(&mut self, n: usize, out: &mut Vec<Span>) {
+        let Some(syntax) = &mut self.syntax else {
+            return;
+        };
+        self.runs.clear();
+        if let Err(e) = syntax.runs(&mut self.doc, n as u64, &mut self.runs) {
+            self.error = Some(format!("highlighting: {e}"));
+            return;
+        }
+        out.extend(self.runs.iter().map(|run| Span {
+            start: run.start,
+            end: run.end,
+            color: Color::rgb(run.rgb[0], run.rgb[1], run.rgb[2]),
+        }));
     }
 
     fn highlights(&mut self, _n: usize, line: &str, out: &mut Vec<Range<usize>>) {

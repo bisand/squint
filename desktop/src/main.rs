@@ -97,6 +97,7 @@ fn snapshot(
         app.format_now();
     }
     app.index_all();
+    app.highlight_now();
     let mut pixels = vec![0u32; (size.width * size.height) as usize];
     let mut paint = |app: &mut app::App| {
         let mut frame = Frame::new(

@@ -238,6 +238,22 @@ impl App {
         }
     }
 
+    /// Loads the grammars, decides on one and parses the file from the top,
+    /// waiting for all of it. For a snapshot, which has no frames to spread
+    /// the work over; the file must already be indexed.
+    pub fn highlight_now(&mut self) {
+        let head = self.editor_ref().document().head(8192);
+        let path = self.editor_ref().document().path().map(Path::to_path_buf);
+        if squint_core::syntax::worth_loading(path.as_deref(), &head) {
+            squint_core::syntax::load();
+        }
+        self.editor().document_mut().decide_syntax();
+        while self.editor_ref().document().highlighting() {
+            self.pump_syntax();
+        }
+        self.refresh_status();
+    }
+
     fn editor(&mut self) -> &mut TextArea<Msg, FileDocument> {
         self.ui
             .widget_mut::<TextArea<Msg, FileDocument>>(self.editor)
@@ -259,6 +275,24 @@ impl App {
         let doc = self.editor().document_mut();
         while !doc.index_step(INDEX_SLICE) && Instant::now() < deadline {}
         self.refresh_status();
+    }
+
+    /// Decides on a grammar once the grammars have loaded, and parses on from
+    /// the top for a few milliseconds while there is parsing left. Reaching
+    /// the document repaints the editor, which is what puts guessed colours
+    /// right as the parse passes them.
+    fn pump_syntax(&mut self) {
+        let (undecided, busy, indexed) = {
+            let doc = self.editor_ref().document();
+            (doc.syntax_undecided(), doc.highlighting(), doc.is_indexed())
+        };
+        if undecided && self.editor().document_mut().decide_syntax() {
+            self.refresh_status();
+        }
+        if busy && indexed {
+            let deadline = Instant::now() + SLICE_TIME;
+            self.editor().document_mut().highlight_until(deadline);
+        }
     }
 
     // ---- the prompt -------------------------------------------------------
@@ -642,13 +676,17 @@ impl App {
             };
             format!("counting… {percent}%")
         };
+        let syntax = doc
+            .syntax_name()
+            .map(|name| format!("   {name}"))
+            .unwrap_or_default();
         let held = doc.memory_bytes() / 1024;
         if let Some(error) = error {
             self.notice = error;
         }
         let mark = if modified { " •" } else { "" };
         let text = format!(
-            "Ln {}, Col {}   {lines}   {held} KB held{mark}   {}",
+            "Ln {}, Col {}   {lines}{syntax}   {held} KB held{mark}   {}",
             caret.line + 1,
             caret.col + 1,
             self.notice
@@ -855,6 +893,7 @@ impl DeniseApp for App {
         self.pump_index();
         self.pump_find();
         self.pump_format();
+        self.pump_syntax();
         if !forwarded.is_empty() {
             self.refresh_status();
         }
@@ -890,13 +929,20 @@ impl DeniseApp for App {
     }
 
     fn next_frame_in(&self) -> Option<Duration> {
-        if !self.editor_ref().document().is_indexed()
+        let doc = self.editor_ref().document();
+        if !doc.is_indexed()
+            || doc.highlighting()
             || self.search.is_some()
             || self.formatting.is_some()
         {
             // Straight back: there is a slice of the file to walk.
             return Some(Duration::ZERO);
         }
+        if doc.syntax_undecided() {
+            // The grammars are loading on their thread; look again shortly.
+            return Some(Duration::from_millis(16));
+        }
+        drop(doc);
         let now = self.started.elapsed().as_millis() as u64;
         self.ui
             .next_wake_ms()
