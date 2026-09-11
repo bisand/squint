@@ -15,7 +15,8 @@ use denise_text::TextStyle;
 use denise_ui::widgets::{ClipboardRequest, Label, TextArea, TextInput};
 use denise_ui::{Anchors, NodeId, Ui};
 use denise_winit::{DeniseApp, Present, WindowConfig};
-use squint_core::format::{self, Format, Indent, Kind};
+use squint_core::editorconfig::{self, Properties};
+use squint_core::format::{self, Format, Kind, Style};
 use squint_core::{Find, FindStep};
 use std::fs::{self, File};
 use std::io::BufWriter;
@@ -69,6 +70,8 @@ struct Search {
 /// A format on its way into a new file.
 struct Formatting {
     job: Format,
+    /// The layout used and where it came from, for the status line.
+    note: String,
     writer: BufWriter<File>,
     /// Where it is being written: beside `out`, renamed to it when complete,
     /// so a half-written file is never opened.
@@ -510,9 +513,19 @@ impl App {
                 return;
             }
         };
-        let job = self.editor_ref().document().format(kind, Indent::default());
+        // The layout is the source file's project's, looked up from where the
+        // source is: the output lands in the temporary directory, where no
+        // project's .editorconfig is.
+        let props = path
+            .as_deref()
+            .map(editorconfig::properties_for)
+            .unwrap_or_default();
+        let style = Style::from_editorconfig(&props);
+        let note = style_note(style, &props);
+        let job = self.editor_ref().document().format(kind, style);
         self.formatting = Some(Formatting {
             job,
+            note,
             writer: BufWriter::with_capacity(1 << 20, file),
             part,
             out,
@@ -555,6 +568,7 @@ impl App {
     fn finish_format(&mut self, running: Formatting) {
         let Formatting {
             job,
+            note,
             writer,
             part,
             out,
@@ -578,7 +592,10 @@ impl App {
                 // sets it again on the next frame.
                 self.highlighted.clear();
                 let kind = job.kind().name();
-                self.say(format!("formatted as {kind} into {}", out.display()));
+                self.say(format!(
+                    "formatted as {kind} with {note} into {}",
+                    out.display()
+                ));
             }
             Err(e) => self.say(format!("{}: {e}", out.display())),
         }
@@ -723,6 +740,15 @@ fn formatted_path(path: Option<&Path>, kind: Kind) -> PathBuf {
     std::env::temp_dir()
         .join("squint")
         .join(format!("{stem}-formatted.{ext}"))
+}
+
+/// A style in a few words, and the `.editorconfig` it came from if one did:
+/// `4 spaces, LF from /work/proj/.editorconfig`.
+fn style_note(style: Style, props: &Properties) -> String {
+    match props.sources().first() {
+        Some(file) => format!("{} from {}", style.describe(), file.display()),
+        None => style.describe(),
+    }
 }
 
 fn part_path(out: &Path) -> PathBuf {

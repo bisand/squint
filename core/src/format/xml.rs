@@ -16,7 +16,7 @@
 //! the last markup, capped, and the start of a tag, capped, for finding
 //! `xml:space`.
 
-use super::{Formatter, Indent};
+use super::{Formatter, Style};
 use memchr::{memchr, memmem};
 
 /// Text held back to decide whether it is only whitespace. Past this it is
@@ -62,7 +62,7 @@ enum Token {
 }
 
 pub struct XmlFormatter {
-    indent: Indent,
+    style: Style,
     state: State,
     /// The bytes from `<` while the markup is being told apart; at most nine.
     open: Vec<u8>,
@@ -84,9 +84,9 @@ pub struct XmlFormatter {
 }
 
 impl XmlFormatter {
-    pub fn new(indent: Indent) -> Self {
+    pub fn new(style: Style) -> Self {
         Self {
-            indent,
+            style,
             state: State::Text,
             open: Vec::with_capacity(9),
             text: Vec::new(),
@@ -116,7 +116,7 @@ impl XmlFormatter {
     /// A new line `depth` levels in, unless nothing has been written yet.
     fn line(&mut self, depth: usize, out: &mut Vec<u8>) {
         if self.wrote {
-            self.indent.newline(depth, out);
+            self.style.line(depth, out);
         }
     }
 
@@ -356,7 +356,7 @@ impl Formatter for XmlFormatter {
             self.wrote = true;
         }
         if self.wrote {
-            out.push(b'\n');
+            self.style.end(out);
         }
     }
 }
@@ -388,7 +388,7 @@ mod tests {
     use super::*;
 
     fn pretty(input: &str) -> String {
-        let mut f = XmlFormatter::new(Indent::default());
+        let mut f = XmlFormatter::new(Style::default());
         let mut out = Vec::new();
         f.feed(input.as_bytes(), &mut out);
         f.finish(&mut out);
@@ -396,7 +396,7 @@ mod tests {
     }
 
     fn pretty_bytewise(input: &str) -> String {
-        let mut f = XmlFormatter::new(Indent::default());
+        let mut f = XmlFormatter::new(Style::default());
         let mut out = Vec::new();
         for b in input.as_bytes() {
             f.feed(std::slice::from_ref(b), &mut out);

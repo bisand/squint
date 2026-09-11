@@ -139,7 +139,8 @@ fn format_file(
     output: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use squint_core::Document;
-    use squint_core::format::{self, Indent};
+    use squint_core::editorconfig;
+    use squint_core::format::{self, Style};
     use std::io::Write as _;
     use std::time::Instant;
 
@@ -164,12 +165,22 @@ fn format_file(
             std::io::stdout().lock(),
         )),
     };
-    format::format_document(&doc, kind, Indent::default(), &mut w)?;
+    // Laid out as the project the output goes into asks, or the input's when
+    // it goes to stdout.
+    let props = editorconfig::properties_for(output.as_deref().unwrap_or(&input));
+    let style = Style::from_editorconfig(&props);
+    format::format_document(&doc, kind, style, &mut w)?;
     w.flush()?;
+    let from = props
+        .sources()
+        .first()
+        .map(|file| format!(" from {}", file.display()))
+        .unwrap_or_default();
     eprintln!(
-        "squint: formatted {} MB of {} in {:.2?}",
+        "squint: formatted {} MB of {} with {}{from} in {:.2?}",
         doc.len() / 1_000_000,
         kind.name(),
+        style.describe(),
         started.elapsed()
     );
     Ok(())

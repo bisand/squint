@@ -6,7 +6,7 @@
 //! the document came from so it can go back there.
 
 use denise_ui::widgets::{Pos, TextDocument};
-use squint_core::format::{Format, Indent, Kind};
+use squint_core::format::{Format, Kind, Style};
 use squint_core::{Document, Find, FindStep, Needle};
 use std::borrow::Cow;
 use std::io::Write;
@@ -142,8 +142,8 @@ impl FileDocument {
 
     /// A format of this document as `kind`, to be stepped with
     /// [`format_step`](Self::format_step).
-    pub fn format(&self, kind: Kind, indent: Indent) -> Format {
-        Format::new(&self.doc, kind, indent)
+    pub fn format(&self, kind: Kind, style: Style) -> Format {
+        Format::new(&self.doc, kind, style)
     }
 
     /// Advances `job` by up to `budget` bytes, writing into `w`. Returns

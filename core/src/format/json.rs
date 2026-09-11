@@ -10,11 +10,11 @@
 //! State is a handful of flags and the depth, so memory does not grow with
 //! the document however deep or long it is.
 
-use super::{Formatter, Indent};
+use super::{Formatter, Style};
 use memchr::memchr2;
 
 pub struct JsonFormatter {
-    indent: Indent,
+    style: Style,
     depth: usize,
     in_string: bool,
     /// The last byte of the string was a backslash, whose escape has not
@@ -35,9 +35,9 @@ pub struct JsonFormatter {
 }
 
 impl JsonFormatter {
-    pub fn new(indent: Indent) -> Self {
+    pub fn new(style: Style) -> Self {
         Self {
-            indent,
+            style,
             depth: 0,
             in_string: false,
             escaped: false,
@@ -52,7 +52,7 @@ impl JsonFormatter {
     fn flush_open(&mut self, out: &mut Vec<u8>) {
         if self.opened {
             self.opened = false;
-            self.indent.newline(self.depth, out);
+            self.style.line(self.depth, out);
         }
     }
 }
@@ -99,7 +99,7 @@ impl Formatter for JsonFormatter {
             let carries_on =
                 matches!(b, b',' | b':' | b'}' | b']') || (literal && self.in_literal && !self.gap);
             if self.depth == 0 && self.wrote && !carries_on {
-                out.push(b'\n');
+                out.extend_from_slice(self.style.newline.bytes());
             }
             match b {
                 b'{' | b'[' => {
@@ -113,7 +113,7 @@ impl Formatter for JsonFormatter {
                     if self.opened {
                         self.opened = false;
                     } else {
-                        self.indent.newline(self.depth, out);
+                        self.style.line(self.depth, out);
                     }
                     out.push(b);
                 }
@@ -121,7 +121,7 @@ impl Formatter for JsonFormatter {
                     self.flush_open(out);
                     out.push(b);
                     if self.depth > 0 {
-                        self.indent.newline(self.depth, out);
+                        self.style.line(self.depth, out);
                     }
                 }
                 b':' => {
@@ -146,7 +146,7 @@ impl Formatter for JsonFormatter {
 
     fn finish(&mut self, out: &mut Vec<u8>) {
         if self.wrote {
-            out.push(b'\n');
+            self.style.end(out);
         }
     }
 }
@@ -154,9 +154,10 @@ impl Formatter for JsonFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::{Indent, Newline};
 
-    fn pretty_with(input: &str, indent: Indent) -> String {
-        let mut f = JsonFormatter::new(indent);
+    fn pretty_with(input: &str, style: Style) -> String {
+        let mut f = JsonFormatter::new(style);
         let mut out = Vec::new();
         f.feed(input.as_bytes(), &mut out);
         f.finish(&mut out);
@@ -164,12 +165,12 @@ mod tests {
     }
 
     fn pretty(input: &str) -> String {
-        pretty_with(input, Indent::default())
+        pretty_with(input, Style::default())
     }
 
     /// The same input fed a byte at a time.
     fn pretty_bytewise(input: &str) -> String {
-        let mut f = JsonFormatter::new(Indent::default());
+        let mut f = JsonFormatter::new(Style::default());
         let mut out = Vec::new();
         for b in input.as_bytes() {
             f.feed(std::slice::from_ref(b), &mut out);
@@ -230,8 +231,28 @@ mod tests {
     #[test]
     fn tabs_indent_one_per_level() {
         assert_eq!(
-            pretty_with(r#"{"a":[1]}"#, Indent::Tab),
+            pretty_with(
+                r#"{"a":[1]}"#,
+                Style {
+                    indent: Indent::Tab,
+                    ..Style::default()
+                }
+            ),
             "{\n\t\"a\": [\n\t\t1\n\t]\n}\n"
+        );
+    }
+
+    #[test]
+    fn line_endings_and_the_final_newline_follow_the_style() {
+        let style = Style {
+            newline: Newline::CrLf,
+            final_newline: false,
+            ..Style::default()
+        };
+        assert_eq!(
+            pretty_with("[1,{}]\n{\"a\":2}", style),
+            "[\r\n  1,\r\n  {}\r\n]\r\n{\r\n  \"a\": 2\r\n}",
+            "between records too, and nothing after the last"
         );
     }
 

@@ -7,8 +7,11 @@
 //!   line access, undo and atomic whole-file save.
 //! - [`find`]: a search that walks the document in bounded steps.
 //! - [`format`]: streaming JSON and XML pretty-printers.
+//! - [`editorconfig`]: the `.editorconfig` lookup the formatters take their
+//!   layout from.
 
 pub mod document;
+pub mod editorconfig;
 pub mod find;
 pub mod format;
 pub mod index;

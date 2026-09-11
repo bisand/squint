@@ -28,6 +28,11 @@ index instead of the lines, and show the file before it has been counted.
 - **Formatting is a stream.** Pretty-printing minified JSON or XML never
   builds a tree: a tokenizer streams from the source to a formatted file,
   which then opens the normal way. Memory stays flat however big the input.
+  The layout follows the project's [EditorConfig](https://editorconfig.org):
+  `indent_style`, `indent_size`, `tab_width`, `end_of_line` and
+  `insert_final_newline`, from the `.editorconfig` files above the file being
+  formatted (above the output file, for `--format` with an output path). With
+  none, it is two spaces, LF and a final newline.
 - **Highlighting is line-local** for logs, JSON, XML and CSV, and grammar
   based with state snapshots every few thousand lines for code, the same trick
   as the line index.
