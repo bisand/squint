@@ -23,12 +23,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return time(args.get(1).map(PathBuf::from));
     }
     if args.first().map(String::as_str) == Some("--snapshot") {
-        // `squint --snapshot out.ppm [scale] [file]`: one frame, no window.
-        // How a layout is reviewed over SSH and how the README's pictures
-        // are made.
+        // `squint --snapshot out.ppm [scale] [file] [line]`: one frame, no
+        // window, scrolled to `line`. How a layout is reviewed over SSH and
+        // how the README's pictures are made.
         let out = args.get(1).cloned().unwrap_or_else(|| "squint.ppm".into());
         let scale: f32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(2.0);
-        return snapshot(&out, scale, args.get(3).map(PathBuf::from));
+        let line: Option<usize> = args.get(4).and_then(|a| a.parse().ok());
+        return snapshot(&out, scale, args.get(3).map(PathBuf::from), line);
     }
     let path: Option<PathBuf> = args
         .iter()
@@ -57,7 +58,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Draws one frame into a PPM file, with no window and no event loop.
-fn snapshot(out: &str, scale: f32, path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn snapshot(
+    out: &str,
+    scale: f32,
+    path: Option<PathBuf>,
+    line: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use denise::{BufferAge, Frame, PixelFormat, Size};
     use std::io::Write as _;
 
@@ -69,7 +75,7 @@ fn snapshot(out: &str, scale: f32, path: Option<PathBuf>) -> Result<(), Box<dyn 
     let mut app = app::App::new(size, scale, path.as_deref());
     app.index_all();
     let mut pixels = vec![0u32; (size.width * size.height) as usize];
-    {
+    let mut paint = |app: &mut app::App| {
         let mut frame = Frame::new(
             &mut pixels,
             size,
@@ -79,6 +85,13 @@ fn snapshot(out: &str, scale: f32, path: Option<PathBuf>) -> Result<(), Box<dyn 
         )
         .expect("frame");
         app.paint_into(&mut frame);
+    };
+    paint(&mut app);
+    if let Some(line) = line {
+        // A jump centres on the rows the last paint saw, so it comes after
+        // one; then the frame is drawn again where it landed.
+        app.go_to_line(line);
+        paint(&mut app);
     }
     let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);
     write!(file, "P6\n{} {}\n255\n", size.width, size.height)?;

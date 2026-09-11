@@ -439,8 +439,15 @@ impl Document {
         }
     }
 
+    /// Whether the content differs from what was opened or last saved.
+    ///
+    /// Compares what the pieces point at, not their newline counts: those are
+    /// filled in as the index reaches them, and counting a file is not
+    /// changing it.
     pub fn is_modified(&self) -> bool {
-        self.pieces != self.clean
+        let same = |a: &Piece, b: &Piece| a.buf == b.buf && a.start == b.start && a.len == b.len;
+        self.pieces.len() != self.clean.len()
+            || !self.pieces.iter().zip(&self.clean).all(|(a, b)| same(a, b))
     }
 
     // ---- saving ---------------------------------------------------------
@@ -616,6 +623,19 @@ mod tests {
         assert_eq!(d.known_lines().unwrap(), 52);
         assert_eq!(d.line(50).unwrap().as_deref(), Some("line 50"));
         assert_eq!(d.line(51).unwrap().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn indexing_does_not_count_as_a_change() {
+        let mut d = Document::from_text("a\nb\n");
+        assert!(!d.is_modified());
+        d.index_complete().unwrap();
+        assert_eq!(d.line_count().unwrap(), Some(3));
+        assert!(!d.is_modified(), "the index filled in newline counts, nothing more");
+        d.insert(0, "x").unwrap();
+        assert!(d.is_modified());
+        assert!(d.undo());
+        assert!(!d.is_modified());
     }
 
     #[test]

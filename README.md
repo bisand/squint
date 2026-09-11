@@ -41,8 +41,8 @@ index instead of the lines, and show the file before it has been counted.
   [DeniseUI](https://github.com/bisand/denise), its `TextArea` widget editing
   the engine's document through the toolkit's `TextDocument` trait, so the
   widget never learns how big the file is. The line index is built in slices
-  between frames while the status line counts up. ⌘S / Ctrl+S saves; copy,
-  cut and paste go through the system clipboard.
+  between frames while the status line counts up. ⌘S / Ctrl+S saves, ⌘L /
+  Ctrl+L goes to a line; copy, cut and paste go through the system clipboard.
 
 ```bash
 cargo run --release -- /var/log/system.log
@@ -52,7 +52,7 @@ cargo run --release -- --snapshot out.ppm 2 some.log     # no window: one frame,
 
 ## Roadmap
 
-1. Find, go-to-line, open dialog, a scrollbar.
+1. Find, and an open dialog.
 2. IME composition forwarded from winit into the text area.
 3. Streaming pretty-printers for JSON and XML.
 4. Highlighting: line-local rules first, then `syntect` with state snapshots,

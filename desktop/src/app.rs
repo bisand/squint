@@ -12,7 +12,7 @@ use denise::{
     Size, theme,
 };
 use denise_text::TextStyle;
-use denise_ui::widgets::{ClipboardRequest, Label, TextArea};
+use denise_ui::widgets::{ClipboardRequest, Label, TextArea, TextInput};
 use denise_ui::{Anchors, NodeId, Ui};
 use denise_winit::{DeniseApp, Present, WindowConfig};
 use std::path::Path;
@@ -26,12 +26,18 @@ const INDEX_SLICE: usize = 8 * 1024 * 1024;
 pub enum Msg {
     Changed,
     Clipboard(ClipboardRequest),
+    /// Enter in the go-to-line field.
+    GoTo,
 }
 
 pub struct App {
     ui: Ui<Msg>,
     editor: NodeId,
     status: NodeId,
+    /// The go-to-line field, while it is open. It takes the status line's
+    /// place, and the status line comes back when it closes.
+    goto: Option<NodeId>,
+    scale: f32,
     title: String,
     /// What the status line says on the right: the last thing that happened.
     notice: String,
@@ -126,6 +132,8 @@ impl App {
             ui,
             editor,
             status,
+            goto: None,
+            scale,
             title,
             notice,
             clipboard: arboard::Clipboard::new().ok(),
@@ -149,6 +157,13 @@ impl App {
         self.ui.paint(frame);
     }
 
+    /// Jumps to 1-based `line`, as the go-to-line field would.
+    pub fn go_to_line(&mut self, line: usize) {
+        self.editor().go_to(line.saturating_sub(1));
+        self.notice = format!("line {line}");
+        self.refresh_status();
+    }
+
     fn editor(&mut self) -> &mut TextArea<Msg, FileDocument> {
         self.ui
             .widget_mut::<TextArea<Msg, FileDocument>>(self.editor)
@@ -169,6 +184,61 @@ impl App {
         let deadline = Instant::now() + Duration::from_millis(6);
         let doc = self.editor().document_mut();
         while !doc.index_step(INDEX_SLICE) && Instant::now() < deadline {}
+        self.refresh_status();
+    }
+
+    /// Opens the go-to-line field over the status line, or refocuses it.
+    fn open_goto(&mut self) {
+        if let Some(field) = self.goto {
+            self.ui.focus(Some(field));
+            return;
+        }
+        let Some(row) = self.ui.bounds(self.status) else {
+            return;
+        };
+        let px = |v: f32| (v * self.scale + 0.5) as u16;
+        let s = |v: i32| (v as f32 * self.scale + 0.5) as i32;
+        let root = self.ui.root();
+        let field = self.ui.add(
+            root,
+            TextInput::<Msg>::new()
+                .with_placeholder("Go to line — Enter to jump, Esc to cancel")
+                .with_submit(Msg::GoTo)
+                .with_max_chars(12)
+                .with_size(px(11.0)),
+            Rect::new(row.x, row.y + s(2), row.width.min(s(360)), row.height - s(4)),
+        );
+        let Some(field) = field else {
+            return;
+        };
+        self.ui.set_visible(self.status, false);
+        self.ui.focus(Some(field));
+        self.goto = Some(field);
+    }
+
+    fn close_goto(&mut self) {
+        if let Some(field) = self.goto.take() {
+            self.ui.remove(field);
+            self.ui.set_visible(self.status, true);
+            self.ui.focus(Some(self.editor));
+        }
+    }
+
+    /// Enter in the go-to-line field: jump, or say why not.
+    fn go_to(&mut self) {
+        let text = self
+            .goto
+            .and_then(|f| self.ui.widget::<TextInput<Msg>>(f))
+            .map(|f| f.text().trim().to_string())
+            .unwrap_or_default();
+        self.close_goto();
+        match text.parse::<usize>() {
+            Ok(n) if n > 0 => {
+                self.editor().go_to(n - 1);
+                self.notice = format!("line {n}");
+            }
+            _ => self.notice = format!("not a line number: {text:?}"),
+        }
         self.refresh_status();
     }
 
@@ -216,6 +286,7 @@ impl App {
     fn handle(&mut self, msg: Msg) {
         match msg {
             Msg::Changed => {}
+            Msg::GoTo => self.go_to(),
             Msg::Clipboard(ClipboardRequest::Copy(text) | ClipboardRequest::Cut(text)) => {
                 if let Some(clip) = &mut self.clipboard
                     && let Err(e) = clip.set_text(text)
@@ -255,6 +326,14 @@ impl DeniseApp for App {
                     continue;
                 }
                 InputEvent::Key {
+                    code: KeyCode::Escape,
+                    state: ElementState::Down,
+                    ..
+                } if self.goto.is_some() => {
+                    self.close_goto();
+                    continue;
+                }
+                InputEvent::Key {
                     code,
                     state: ElementState::Down,
                     modifiers,
@@ -263,6 +342,10 @@ impl DeniseApp for App {
                     match code {
                         KeyCode::S => {
                             self.save();
+                            continue;
+                        }
+                        KeyCode::L => {
+                            self.open_goto();
                             continue;
                         }
                         KeyCode::Q => {
