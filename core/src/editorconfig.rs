@@ -43,6 +43,17 @@ impl Properties {
         self.values.is_empty()
     }
 
+    /// How many columns a tab is, as the spec works it out: `tab_width`, or
+    /// failing that a numeric `indent_size`. `None` when neither says.
+    pub fn tab_width(&self) -> Option<u8> {
+        let width = |key| {
+            self.get(key)
+                .and_then(|v| v.parse::<u8>().ok())
+                .filter(|&n| n > 0)
+        };
+        width("tab_width").or_else(|| width("indent_size"))
+    }
+
     fn set(&mut self, key: &str, value: &str) {
         let key = key.to_ascii_lowercase();
         match self.values.iter_mut().find(|(k, _)| *k == key) {
@@ -442,6 +453,23 @@ mod tests {
             ]
         );
         assert_eq!(file.sections[1].glob, "[ab].txt");
+    }
+
+    #[test]
+    fn the_tab_width_falls_back_to_a_numeric_indent_size() {
+        let props = |pairs: &[(&str, &str)]| pairs.iter().copied().collect::<Properties>();
+        assert_eq!(
+            props(&[("tab_width", "8"), ("indent_size", "2")]).tab_width(),
+            Some(8)
+        );
+        assert_eq!(props(&[("indent_size", "3")]).tab_width(), Some(3));
+        assert_eq!(props(&[("indent_size", "tab")]).tab_width(), None);
+        assert_eq!(
+            props(&[("tab_width", "unset"), ("indent_size", "5")]).tab_width(),
+            Some(5)
+        );
+        assert_eq!(props(&[("tab_width", "0")]).tab_width(), None);
+        assert_eq!(props(&[]).tab_width(), None);
     }
 
     #[test]

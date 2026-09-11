@@ -32,7 +32,9 @@ index instead of the lines, and show the file before it has been counted.
   `indent_style`, `indent_size`, `tab_width`, `end_of_line` and
   `insert_final_newline`, from the `.editorconfig` files above the file being
   formatted (above the output file, for `--format` with an output path). With
-  none, it is two spaces, LF and a final newline.
+  none, it is two spaces, LF and a final newline. The editor's tab stops come
+  from the same place: `tab_width`, or a numeric `indent_size`, and every four
+  columns otherwise.
 - **Highlighting is line-local** for logs, JSON, XML and CSV, and grammar
   based with state snapshots every few thousand lines for code, the same trick
   as the line index.

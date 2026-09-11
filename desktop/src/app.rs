@@ -142,6 +142,11 @@ impl App {
         if notice.is_empty() && doc.path().is_none() {
             notice = "no file: squint <file>".into();
         }
+        // Tab stops as the file's project sets them, or every four columns.
+        let tab_width = path
+            .map(editorconfig::properties_for)
+            .and_then(|props| props.tab_width())
+            .unwrap_or(4);
 
         let root = ui.root();
         let (w, h) = (size.width as i32, size.height as i32);
@@ -151,6 +156,7 @@ impl App {
                 root,
                 TextArea::new(doc)
                     .with_style(mono)
+                    .with_tab_width(tab_width)
                     .with_change(Msg::Changed)
                     .with_clipboard(Msg::Clipboard),
                 Rect::new(0, 0, w, h - status_h),
