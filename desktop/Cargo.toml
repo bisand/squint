@@ -14,10 +14,10 @@ path = "src/main.rs"
 squint-core = { path = "../core", features = ["syntax"] }
 # DeniseUI from its repository until the release that carries `TextArea`.
 # All four from the same commit: two copies of `denise` would be two types.
-denise = { git = "https://github.com/bisand/denise", rev = "24cda989aeca89450d7e5f66621f679d4c038f8d", features = ["std"] }
-denise-text = { git = "https://github.com/bisand/denise", rev = "24cda989aeca89450d7e5f66621f679d4c038f8d", features = ["truetype"] }
-denise-ui = { git = "https://github.com/bisand/denise", rev = "24cda989aeca89450d7e5f66621f679d4c038f8d", features = ["std", "truetype"] }
-denise-winit = { git = "https://github.com/bisand/denise", rev = "24cda989aeca89450d7e5f66621f679d4c038f8d", features = ["gpu"] }
+denise = { git = "https://github.com/bisand/denise", rev = "5ea435ef156a8a084a9c19ce0ff900a3e1d09ebc", features = ["std"] }
+denise-text = { git = "https://github.com/bisand/denise", rev = "5ea435ef156a8a084a9c19ce0ff900a3e1d09ebc", features = ["truetype"] }
+denise-ui = { git = "https://github.com/bisand/denise", rev = "5ea435ef156a8a084a9c19ce0ff900a3e1d09ebc", features = ["std", "truetype"] }
+denise-winit = { git = "https://github.com/bisand/denise", rev = "5ea435ef156a8a084a9c19ce0ff900a3e1d09ebc", features = ["gpu"] }
 arboard = { version = "3", default-features = false }
 # The platform's open, save and question dialogs.
 rfd = "0.15"
