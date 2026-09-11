@@ -1,7 +1,7 @@
 [package]
 name = "squint"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "squint: opens huge text files instantly, lets you look, tweak and save"
 publish = false
@@ -12,3 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 squint-core = { path = "../core" }
+# DeniseUI from its repository until the release that carries `TextArea`.
+# All four from the same commit: two copies of `denise` would be two types.
+denise = { git = "https://github.com/bisand/denise", rev = "aabc535c841f95ba0f236f8a7b32c812a1afea8b", features = ["std"] }
+denise-text = { git = "https://github.com/bisand/denise", rev = "aabc535c841f95ba0f236f8a7b32c812a1afea8b", features = ["truetype"] }
+denise-ui = { git = "https://github.com/bisand/denise", rev = "aabc535c841f95ba0f236f8a7b32c812a1afea8b", features = ["std", "truetype"] }
+denise-winit = { git = "https://github.com/bisand/denise", rev = "aabc535c841f95ba0f236f8a7b32c812a1afea8b", features = ["gpu"] }
+arboard = { version = "3", default-features = false }

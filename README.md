@@ -37,23 +37,26 @@ index instead of the lines, and show the file before it has been counted.
 - [`core/`](core/) — the engine as a plain Rust crate: `Source` (file or
   memory), `LineIndex`, `Document`. No UI, no threads of its own; a front end
   drives the index scan in slices from a worker.
-- [`desktop/`](desktop/) — the app. Today a command-line placeholder that
-  opens a file and times the parts; it becomes the
-  [DeniseUI](https://github.com/bisand/denise) window once the toolkit has a
-  multi-line text area to build it on.
+- [`desktop/`](desktop/) — the app: one window drawn by
+  [DeniseUI](https://github.com/bisand/denise), its `TextArea` widget editing
+  the engine's document through the toolkit's `TextDocument` trait, so the
+  widget never learns how big the file is. The line index is built in slices
+  between frames while the status line counts up. ⌘S / Ctrl+S saves; copy,
+  cut and paste go through the system clipboard.
 
 ```bash
 cargo run --release -- /var/log/system.log
+cargo run --release -- --time /var/log/system.log        # no window: how long the parts take
+cargo run --release -- --snapshot out.ppm 2 some.log     # no window: one frame, at 2x
 ```
 
 ## Roadmap
 
-1. `TextArea` widget in DeniseUI, rendering and editing through a document
-   trait rather than owning a string, with IME composition forwarded from
-   winit.
-2. The window: gutter, scrolling by line index, find, open and save.
+1. Find, go-to-line, open dialog, a scrollbar.
+2. IME composition forwarded from winit into the text area.
 3. Streaming pretty-printers for JSON and XML.
-4. Highlighting: line-local rules first, then `syntect` with state snapshots.
+4. Highlighting: line-local rules first, then `syntect` with state snapshots,
+   through the widget's `spans` hook.
 5. Conflict detection when the file changes underneath.
 6. Long lines: a single-line multi-gigabyte JSON breaks line-based paging and
    needs chunked lines.
