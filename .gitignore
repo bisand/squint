@@ -1,0 +1,9 @@
+# Rust
+target/
+
+# macOS Finder metadata
+.DS_Store
+
+# Scratch files used to try the app on big inputs
+*.log
+*.squint-tmp

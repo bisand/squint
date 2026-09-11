@@ -1,0 +1,18 @@
+[package]
+name = "squint-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "squint engine: a piece-table document over a file that is read only where it is looked at, with a sparse line index"
+publish = false
+
+[lib]
+name = "squint_core"
+path = "src/lib.rs"
+
+[dependencies]
+bytecount = "0.6"
+memchr = "2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["core", "desktop"]
+
+[profile.release]
+debug = 1          # keep symbols for profiling the document engine
+lto = "thin"
+codegen-units = 1
