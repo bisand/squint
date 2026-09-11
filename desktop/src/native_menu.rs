@@ -264,6 +264,28 @@ fn wake() {
     let () = unsafe { msg_send![&*delegate, windowDidChangeOcclusionState: nothing] };
 }
 
+/// Tells AppKit this application's windows are not tabbed together.
+///
+/// macOS tabs an application's windows unless told otherwise, and puts Show
+/// Next Tab and Show Previous Tab of its own in the Window menu, on ⌃⇥ and
+/// ⌃⇧⇥. A menu row takes its keys before the window hears of them, so squint's
+/// Ctrl+Tab never arrived: the Window menu flashed instead, as AppKit's row went
+/// looking for a window tab that was not there. squint's tabs are its own, so
+/// the system's are turned off, and their rows and their keys go with them.
+pub fn forbid_window_tabs() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindow, NSWindowTabbingMode};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
+    // The window is open already, and was made while the answer was yes.
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

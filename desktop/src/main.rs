@@ -6,15 +6,19 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod config;
 mod document;
 mod fonts;
 mod menu;
 #[cfg(target_os = "macos")]
 mod native_menu;
 mod recent;
+mod session;
+mod settings;
+mod stamp;
+mod switcher;
 
 use denise_winit::{Error, Present, run_with};
-use recent::Recent;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,27 +41,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.first().map(String::as_str) == Some("--snapshot") {
         // `squint --snapshot out.ppm [scale] [file] [line] [find] [--formatted]
-        // [--menu <title>]`: one frame, no window, scrolled to `line` and then
-        // to the first match of `find` after it; with `--formatted`, of the
-        // file as ⇧⌘F formats it; with `--menu`, with that menu open from the
-        // menu bar in the window. How a layout is reviewed over SSH and how the
-        // README's pictures are made.
+        // [--menu <title>] [--session <file>]`: one frame, no window, scrolled
+        // to `line` and then to the first match of `find` after it; with
+        // `--formatted`, of the file as ⇧⌘F formats it; with `--menu`, with
+        // that menu open from the menu bar in the window; with `--session`,
+        // with the tabs a session file lists, which is read and never written.
+        // How a layout is reviewed over SSH and how the README's pictures are
+        // made.
         let formatted = args.iter().any(|a| a == "--formatted");
-        let menu = args
-            .iter()
-            .position(|a| a == "--menu")
-            .and_then(|i| args.get(i + 1))
-            .cloned();
-        let mut menu_title = false;
+        let value_of = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+        };
+        let menu = value_of("--menu");
+        let session = value_of("--session").map(PathBuf::from);
+        let mut value = false;
         let args: Vec<&str> = args
             .iter()
             .map(String::as_str)
             .filter(|a| {
-                if std::mem::take(&mut menu_title) {
+                if std::mem::take(&mut value) {
                     return false;
                 }
-                menu_title = *a == "--menu";
-                !menu_title && *a != "--formatted"
+                value = matches!(*a, "--menu" | "--session");
+                !value && *a != "--formatted"
             })
             .collect();
         let out = args.get(1).copied().unwrap_or("squint.ppm");
@@ -65,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let path = args.get(3).map(PathBuf::from);
         let line: Option<usize> = args.get(4).and_then(|a| a.parse().ok());
         let query = args.get(5).map(|a| a.to_string());
-        return snapshot(out, scale, path, formatted, line, query, menu);
+        return snapshot(out, scale, path, formatted, line, query, menu, session);
     }
     let path: Option<PathBuf> = args
         .iter()
@@ -81,13 +90,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let menus = app::Menus::for_platform();
     let open_path = path.clone();
-    let open =
-        move |size, scale| app::App::new(size, scale, open_path.as_deref(), menus, Recent::load());
+    let open = move |size, scale| {
+        app::App::new(
+            size,
+            scale,
+            open_path.as_deref(),
+            menus,
+            app::Remembered::load(),
+        )
+    };
     match run_with(app::App::config(present), open) {
         Err(Error::Gpu(reason) | Error::Present(reason)) if present == Present::Gpu => {
             eprintln!("squint: cannot draw through the GPU ({reason}); drawing in software");
             let open = move |size, scale| {
-                app::App::new(size, scale, path.as_deref(), menus, Recent::load())
+                app::App::new(size, scale, path.as_deref(), menus, app::Remembered::load())
             };
             run_with(app::App::config(Present::Software), open)?;
             Ok(())
@@ -98,6 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Draws one frame into a PPM file, with no window and no event loop.
+#[allow(clippy::too_many_arguments)]
 fn snapshot(
     out: &str,
     scale: f32,
@@ -106,6 +123,7 @@ fn snapshot(
     line: Option<usize>,
     query: Option<String>,
     menu: Option<String>,
+    session: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use denise::{BufferAge, Frame, PixelFormat, Size};
     use std::io::Write as _;
@@ -121,7 +139,13 @@ fn snapshot(
         app::Menus::System if menu.is_none() => app::Menus::Off,
         _ => app::Menus::Window,
     };
-    let mut app = app::App::new(size, scale, path.as_deref(), menus, Recent::in_memory());
+    let mut memory = app::Remembered::in_memory();
+    if let Some(file) = session {
+        // Read, and kept in memory: a snapshot leaves the file as it found it.
+        let saved: config::Kept<session::Session> = config::Kept::load_from(Some(file));
+        memory.session = config::Kept::in_memory(saved.get().clone());
+    }
+    let mut app = app::App::new(size, scale, path.as_deref(), menus, memory);
     if formatted {
         app.format_now();
     }

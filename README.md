@@ -25,6 +25,13 @@ index instead of the lines, and show the file before it has been counted.
   beside the original, which is renamed into place. Inserting in the middle
   of a file shifts every byte after it, so there is no partial save; a full
   write at disk speed is the honest option and the safe one.
+- **A file changed underneath is noticed.** The document reads its file where
+  it is looked at, so a file something else rewrites is not merely out of
+  date: what is on screen could become a mix of the two. Every couple of
+  seconds each tab's file is looked at — its size, modification time and
+  inode — and one that has changed asks whether to reload it. With Tools ▸
+  Settings ▸ Ask Before Reloading Changed Files off, a tab with no unsaved
+  changes reloads quietly; one with changes still asks.
 - **Formatting is a stream.** Pretty-printing minified JSON or XML never
   builds a tree: a tokenizer streams from the source to a formatted file,
   which then opens the normal way. Memory stays flat however big the input.
@@ -62,13 +69,18 @@ index instead of the lines, and show the file before it has been counted.
   built from one list in [`desktop/src/menu.rs`](desktop/src/menu.rs), so they
   offer the same commands with the same keys. Opening, saving and the
   unsaved-changes question use the platform's own dialogs, and Open Recent is
-  kept in the user's configuration directory.
+  kept in the user's configuration directory. Files open in tabs — DeniseUI's
+  `Tabs`, which close, drag into order, rename on a double click and take a
+  colour from the menu a right click opens — and the tabs open when squint
+  closes open again when it starts, at the lines they were on (Tools ▸
+  Settings ▸ Reopen Tabs at Launch). A tab behind the others does no work
+  until it comes to the front.
 
 | Keys (⌘ on macOS, Ctrl elsewhere) | |
 |---|---|
-| ⌘N / ⌘O | New file / open a file |
+| ⌘N or ⌘T / ⌘O | New tab / open a file in a tab |
 | ⌘S / ⇧⌘S | Save / save as |
-| ⌘W, ⌘Q | Close the window / quit, asking first about unsaved changes |
+| ⌘W, ⌘Q | Close the tab / quit, asking first about unsaved changes |
 | ⌘F | Find. Enter for the next match, Shift+Enter for the previous, Esc to close |
 | ⌘G / ⇧⌘G, F3 / ⇧F3 | Next / previous match of the last search, with the field closed |
 | ⌘L | Go to line |
@@ -76,6 +88,7 @@ index instead of the lines, and show the file before it has been counted.
 | ⌘Z / ⇧⌘Z | Undo / redo; Ctrl+Y redoes too, off macOS |
 | ⌘= / ⌘- / ⌘0 | Bigger / smaller / the usual text size |
 | F10 | Into the menu bar in the window, off macOS |
+| Ctrl+Tab | The last tab; with Ctrl held, on along the row, backwards with Shift. The control key on macOS too |
 
 Find walks the file in slices between frames, like the index, so a search
 through gigabytes keeps the window drawing and shows how far it has got. A
@@ -88,6 +101,7 @@ cargo run --release -- /var/log/system.log
 cargo run --release -- --time /var/log/system.log        # no window: how long the parts take
 cargo run --release -- --snapshot out.ppm 2 some.log 1 error   # no window: one frame at 2x, at the first "error"
 cargo run --release -- --snapshot menu.ppm 2 some.log --menu File   # no window: with the File menu open in the window
+cargo run --release -- --snapshot tabs.ppm 2 --session tabs.json    # no window: with the tabs a session file lists
 cargo run --release -- --format dump.json pretty.json          # no window: pretty-print to a file, or to stdout
 ```
 
@@ -96,9 +110,8 @@ cargo run --release -- --format dump.json pretty.json          # no window: pret
 1. IME composition forwarded from winit into the text area.
 2. Highlighting for logs, which syntect has no grammar for: ctail's line-local
    rules, through the same `spans` hook.
-3. Conflict detection when the file changes underneath.
-4. More than one window: New and Open replace the file in this one.
-5. Long lines: a single-line multi-gigabyte JSON still has to be formatted
+3. More than one window, and tabs dragged from one to another.
+4. Long lines: a single-line multi-gigabyte JSON still has to be formatted
    before it can be paged through; chunked lines would let it be read as is.
 
 ## License

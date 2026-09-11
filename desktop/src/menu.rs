@@ -1,12 +1,15 @@
 //! What the menus offer: one list of commands, drawn by the system's menu bar
-//! on macOS and by DeniseUI's along the top of the window everywhere else.
+//! on macOS and by DeniseUI's along the top of the window everywhere else, and
+//! the menu a tab opens when it is right-clicked.
 //!
 //! The list is built from [`State`] whenever it is wanted — a menu opening in
 //! the window, or the system's bar being brought up to date — so what is
 //! enabled and what is ticked is always what is true at that moment. Both bars
 //! read the same list, and the keys a row shows are the keys that do it: the
-//! window catches the ones in [`shortcut`], and the text area the edits.
+//! window catches the ones in [`shortcut`] and Ctrl+Tab, and the text area the
+//! edits.
 
+use crate::session::TabColor;
 use denise::{KeyCode, Modifiers};
 use denise_ui::widgets::MenuItem;
 use std::path::{Path, PathBuf};
@@ -20,15 +23,19 @@ pub const ISSUES: &str = "https://github.com/bisand/squint/issues";
 /// Something a menu row, or its keys, asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
+    /// A new, empty tab.
     New,
     Open,
     /// The recent file at this place in the list.
     OpenRecent(usize),
     ClearRecent,
+    /// Closes the tab in front.
     Close,
+    CloseOtherTabs,
     Save,
     SaveAs,
     Revert,
+    ReloadFromDisk,
     Quit,
     Undo,
     Redo,
@@ -44,10 +51,19 @@ pub enum Command {
     ZoomOut,
     ActualSize,
     LineNumbers,
+    NextTab,
+    PreviousTab,
+    RenameTab,
+    /// Colours the tab in front, or takes its colour away.
+    SetTabColor(Option<TabColor>),
     Format,
     ReadOnly,
     CopyPath,
     Reveal,
+    /// Turns reopening the tabs at launch on or off.
+    ReopenTabs,
+    /// Turns asking before a changed file is reloaded on or off.
+    AskBeforeReloading,
     Help,
     ReportIssue,
     About,
@@ -75,7 +91,8 @@ pub enum Entry {
         command: Command,
         label: String,
         /// The keys, in the portable spelling `Cmd+Shift+S`: Command on
-        /// macOS, Ctrl elsewhere. Empty for none.
+        /// macOS, Ctrl elsewhere. `Ctrl+` is the control key everywhere.
+        /// Empty for none.
         keys: &'static str,
         enabled: bool,
         /// Whether the row is a setting, and if so whether it is on.
@@ -135,11 +152,11 @@ pub struct Title {
     pub entries: Vec<Entry>,
 }
 
-/// What the menus reflect.
+/// What the menus reflect: the tab in front, the tabs, and the settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
-    /// Whether the document has a file, which Revert, Copy Path and Reveal
-    /// need.
+    /// Whether the document has a file, which Revert, Reload, Copy Path and
+    /// Reveal need.
     pub has_file: bool,
     pub modified: bool,
     /// Whether the file looks like JSON or XML.
@@ -147,11 +164,17 @@ pub struct State {
     pub read_only: bool,
     pub line_numbers: bool,
     pub recent: Vec<PathBuf>,
+    /// How many tabs there are.
+    pub tabs: usize,
+    /// The colour of the tab in front.
+    pub tab_color: Option<TabColor>,
+    pub reopen_tabs: bool,
+    pub ask_before_reloading: bool,
 }
 
 /// The menus, left to right. `system` is for the system's menu bar, which
-/// gains the application and window menus and the rows the system carries
-/// out, and moves Quit and About to where macOS keeps them.
+/// gains the application menu and the rows the system carries out, and moves
+/// Quit and About to where macOS keeps them.
 pub fn titles(state: &State, system: bool) -> Vec<Title> {
     use Command::*;
     let mac = cfg!(target_os = "macos");
@@ -188,21 +211,20 @@ pub fn titles(state: &State, system: bool) -> Vec<Title> {
     recent.push(item(ClearRecent, "Clear Menu", "").when(!state.recent.is_empty()));
 
     let mut file = vec![
-        item(New, "New", "Cmd+N"),
+        item(New, "New Tab", "Cmd+N"),
         item(Open, "Open…", "Cmd+O"),
         Entry::Submenu {
             label: "Open Recent".into(),
             entries: recent,
         },
         Entry::Separator,
-        item(
-            Close,
-            if system { "Close" } else { "Close Window" },
-            "Cmd+W",
-        ),
+        item(Close, "Close Tab", "Cmd+W"),
+        item(CloseOtherTabs, "Close Other Tabs", "").when(state.tabs > 1),
+        Entry::Separator,
         item(Save, "Save", "Cmd+S"),
         item(SaveAs, "Save As…", "Cmd+Shift+S"),
         item(Revert, "Revert to Saved", "").when(state.has_file && state.modified),
+        item(ReloadFromDisk, "Reload from Disk", "").when(state.has_file),
     ];
     if !system {
         let quit = if cfg!(windows) { "Exit" } else { "Quit" };
@@ -261,31 +283,58 @@ pub fn titles(state: &State, system: bool) -> Vec<Title> {
             item(ReadOnly, "Read Only", "").ticked(state.read_only),
             Entry::Separator,
             item(CopyPath, "Copy File Path", "").when(state.has_file),
-            item(
-                Reveal,
-                if mac {
-                    "Reveal in Finder"
-                } else {
-                    "Show in Folder"
-                },
-                "",
-            )
-            .when(state.has_file),
+            item(Reveal, reveal_label(), "").when(state.has_file),
+            Entry::Separator,
+            Entry::Submenu {
+                label: "Settings".into(),
+                entries: vec![
+                    item(ReopenTabs, "Reopen Tabs at Launch", "").ticked(state.reopen_tabs),
+                    item(AskBeforeReloading, "Ask Before Reloading Changed Files", "")
+                        .ticked(state.ask_before_reloading),
+                ],
+            },
         ],
     });
 
+    // Ctrl+Tab is not given to the system's menu: a menu that took the key
+    // would report it outside winit, after the release of Ctrl that ends a
+    // walk along the tabs had already been seen.
+    let mut window = Vec::new();
     if system {
-        titles.push(Title {
-            label: "Window".into(),
-            role: Role::Window,
-            entries: vec![
-                Entry::System(System::Minimize),
-                Entry::System(System::Zoom),
-                Entry::Separator,
-                Entry::System(System::BringAllToFront),
-            ],
-        });
+        window.extend([
+            Entry::System(System::Minimize),
+            Entry::System(System::Zoom),
+            Entry::Separator,
+        ]);
     }
+    window.extend([
+        item(
+            NextTab,
+            "Show Next Tab",
+            if system { "" } else { "Ctrl+Tab" },
+        )
+        .when(state.tabs > 1),
+        item(
+            PreviousTab,
+            "Show Previous Tab",
+            if system { "" } else { "Ctrl+Shift+Tab" },
+        )
+        .when(state.tabs > 1),
+        Entry::Separator,
+        item(RenameTab, "Rename Tab…", ""),
+        Entry::Submenu {
+            label: "Tab Color".into(),
+            entries: color_entries(state),
+        },
+    ]);
+    if system {
+        window.extend([Entry::Separator, Entry::System(System::BringAllToFront)]);
+    }
+    titles.push(Title {
+        label: "Window".into(),
+        role: if system { Role::Window } else { Role::Plain },
+        entries: window,
+    });
 
     let mut help = vec![
         item(Help, "squint Help", ""),
@@ -301,6 +350,46 @@ pub fn titles(state: &State, system: bool) -> Vec<Title> {
     });
 
     titles
+}
+
+/// The menu a right-clicked tab opens, for the tab in front: the right-click
+/// brings it there first.
+pub fn tab_entries(state: &State) -> Vec<Entry> {
+    use Command::*;
+    vec![
+        item(RenameTab, "Rename Tab…", ""),
+        Entry::Submenu {
+            label: "Tab Color".into(),
+            entries: color_entries(state),
+        },
+        Entry::Separator,
+        item(Close, "Close Tab", "Cmd+W"),
+        item(CloseOtherTabs, "Close Other Tabs", "").when(state.tabs > 1),
+        Entry::Separator,
+        item(CopyPath, "Copy File Path", "").when(state.has_file),
+        item(Reveal, reveal_label(), "").when(state.has_file),
+    ]
+}
+
+/// No colour, then the colours, with the tab's own ticked.
+fn color_entries(state: &State) -> Vec<Entry> {
+    let mut entries = vec![
+        item(Command::SetTabColor(None), "None", "").ticked(state.tab_color.is_none()),
+        Entry::Separator,
+    ];
+    entries.extend(TabColor::ALL.map(|color| {
+        item(Command::SetTabColor(Some(color)), color.label(), "")
+            .ticked(state.tab_color == Some(color))
+    }));
+    entries
+}
+
+fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else {
+        "Show in Folder"
+    }
 }
 
 /// A recent file as its row says it: the name, then the folder it is in, with
@@ -342,12 +431,19 @@ fn rows_into(entries: &[Entry], commands: &mut Vec<Option<Command>>) -> Vec<Menu
                 checked,
             } => {
                 commands.push(Some(*command));
-                items.push(
-                    MenuItem::new(label.clone())
-                        .with_shortcut(keys)
-                        .enabled(*enabled)
-                        .checked(checked.unwrap_or(false)),
-                );
+                let mut row = MenuItem::new(label.clone())
+                    .with_shortcut(keys)
+                    .enabled(*enabled)
+                    .checked(checked.unwrap_or(false));
+                // DeniseUI writes Ctrl as ⌘ on a Mac, where the portable
+                // spelling means the command key; the tab keys are the control
+                // key there too.
+                if cfg!(target_os = "macos") && keys.starts_with("Ctrl+") {
+                    row.shortcut = keys
+                        .replace("Ctrl+", "\u{2303}")
+                        .replace("Shift+", "\u{21e7}");
+                }
+                items.push(row);
             }
             Entry::Submenu { label, entries } => {
                 commands.push(None);
@@ -367,7 +463,8 @@ fn rows_into(entries: &[Entry], commands: &mut Vec<Option<Command>>) -> Vec<Menu
 
 /// The command a key press is the shortcut for, among the ones the window
 /// catches before the text area sees the key. The edits are the text area's
-/// own keys and are not here: see [`edit_keys`].
+/// own keys and are not here: see [`edit_keys`]. Nor is Ctrl+Tab, whose answer
+/// depends on whether Ctrl has been let go since the last one.
 pub fn shortcut(code: KeyCode, modifiers: Modifiers) -> Option<Command> {
     use Command::*;
     let primary = modifiers.contains(Modifiers::SUPER) || modifiers.contains(Modifiers::CTRL);
@@ -376,7 +473,7 @@ pub fn shortcut(code: KeyCode, modifiers: Modifiers) -> Option<Command> {
         KeyCode::F3 if shift => FindPrevious,
         KeyCode::F3 => FindNext,
         _ if !primary => return None,
-        KeyCode::N => New,
+        KeyCode::N | KeyCode::T => New,
         KeyCode::O => Open,
         KeyCode::W => Close,
         KeyCode::Q => Quit,
@@ -424,6 +521,8 @@ mod tests {
         State {
             has_file: true,
             recent: vec!["/tmp/a.log".into(), "/var/log/b.log".into()],
+            tabs: 3,
+            tab_color: Some(TabColor::Teal),
             ..State::default()
         }
     }
@@ -451,26 +550,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_picked_row_is_the_command_written_on_it() {
-        for system in [false, true] {
-            for title in titles(&state(), system) {
-                let (items, commands) = rows(&title.entries);
-                let mut labels = Vec::new();
-                flatten(&items, &mut labels);
-                assert_eq!(labels.len(), commands.len(), "{}", title.label);
-                let mut expected = Vec::new();
-                commands_of(&title.entries, &mut expected);
-                for (label, command, _) in expected {
-                    let at = labels.iter().position(|l| *l == label).expect("row");
-                    assert_eq!(commands[at], Some(command), "{label} in {}", title.label);
-                }
-            }
+    fn picks_match(entries: &[Entry], what: &str) {
+        let (items, commands) = rows(entries);
+        let mut labels = Vec::new();
+        flatten(&items, &mut labels);
+        assert_eq!(labels.len(), commands.len(), "{what}");
+        let mut expected = Vec::new();
+        commands_of(entries, &mut expected);
+        for (label, command, _) in expected {
+            let at = labels.iter().position(|l| *l == label).expect("row");
+            assert_eq!(commands[at], Some(command), "{label} in {what}");
         }
     }
 
     #[test]
-    fn the_system_bar_adds_the_application_and_window_menus_and_the_window_bar_does_without() {
+    fn a_picked_row_is_the_command_written_on_it() {
+        for system in [false, true] {
+            for title in titles(&state(), system) {
+                picks_match(&title.entries, &title.label);
+            }
+        }
+        picks_match(&tab_entries(&state()), "the tab's menu");
+    }
+
+    #[test]
+    fn the_system_bar_adds_the_application_menu_and_the_window_bar_does_without() {
         let system = titles(&state(), true);
         assert_eq!(system[0].role, Role::App);
         assert!(system.iter().any(|t| t.role == Role::Window));
@@ -478,7 +582,7 @@ mod tests {
 
         let window = titles(&state(), false);
         let labels: Vec<&str> = window.iter().map(|t| t.label.as_str()).collect();
-        assert_eq!(labels, ["File", "Edit", "View", "Tools", "Help"]);
+        assert_eq!(labels, ["File", "Edit", "View", "Tools", "Window", "Help"]);
         let mut all = Vec::new();
         for title in &window {
             commands_of(&title.entries, &mut all);
@@ -519,6 +623,42 @@ mod tests {
             .expect("row");
         assert_eq!(submenu.items.len(), 1, "only Clear Menu");
         assert!(!submenu.items[0].enabled);
+    }
+
+    /// The tab's colour is the one ticked, and there is always exactly one.
+    #[test]
+    fn the_tab_colour_menu_ticks_the_tabs_colour() {
+        let ticked = |state: &State| -> Vec<String> {
+            let (items, _) = rows(&tab_entries(state));
+            let colours = items.iter().find(|i| i.label == "Tab Color").expect("row");
+            colours
+                .items
+                .iter()
+                .filter(|i| i.checked)
+                .map(|i| i.label.clone())
+                .collect()
+        };
+        assert_eq!(ticked(&state()), ["Teal"]);
+        assert_eq!(ticked(&State::default()), ["None"]);
+    }
+
+    /// Switching tabs and closing the others wait for there to be others.
+    #[test]
+    fn tab_rows_wait_for_more_than_one_tab() {
+        let one = State {
+            tabs: 1,
+            ..State::default()
+        };
+        let mut all = Vec::new();
+        let (items, commands) = rows(&titles(&one, false)[4].entries);
+        for (item, command) in items.iter().zip(&commands) {
+            all.push((item.label.clone(), *command, item.enabled));
+        }
+        for (label, _, enabled) in all {
+            if label.starts_with("Show") {
+                assert!(!enabled, "{label}");
+            }
+        }
     }
 
     /// The keys `spec` names, as the window would be told of them.
@@ -569,7 +709,13 @@ mod tests {
             for title in titles(&state(), system) {
                 commands_of(&title.entries, &mut all);
             }
+            commands_of(&tab_entries(&state()), &mut all);
             for (label, command, keys) in all.into_iter().filter(|(_, _, k)| !k.is_empty()) {
+                // Ctrl+Tab is the window's to answer, by whether Ctrl is held.
+                if matches!(command, Command::NextTab | Command::PreviousTab) {
+                    assert!(!system, "the system's menu must not take Ctrl+Tab");
+                    continue;
+                }
                 let (code, modifiers) = press(keys);
                 let caught = shortcut(code, modifiers) == Some(command);
                 let typed = edit_keys(command) == Some((code, modifiers));

@@ -14,15 +14,20 @@ path = "src/main.rs"
 squint-core = { path = "../core", features = ["syntax"] }
 # DeniseUI from its repository until the release that carries `TextArea`.
 # All four from the same commit: two copies of `denise` would be two types.
-denise = { git = "https://github.com/bisand/denise", rev = "8aa9ef8d68d0459fef57cf781d5ee81c9b464852", features = ["std"] }
-denise-text = { git = "https://github.com/bisand/denise", rev = "8aa9ef8d68d0459fef57cf781d5ee81c9b464852", features = ["truetype"] }
-denise-ui = { git = "https://github.com/bisand/denise", rev = "8aa9ef8d68d0459fef57cf781d5ee81c9b464852", features = ["std", "truetype"] }
-denise-winit = { git = "https://github.com/bisand/denise", rev = "8aa9ef8d68d0459fef57cf781d5ee81c9b464852", features = ["gpu"] }
+denise = { git = "https://github.com/bisand/denise", rev = "24cda989aeca89450d7e5f66621f679d4c038f8d", features = ["std"] }
+denise-text = { git = "https://github.com/bisand/denise", rev = "24cda989aeca89450d7e5f66621f679d4c038f8d", features = ["truetype"] }
+denise-ui = { git = "https://github.com/bisand/denise", rev = "24cda989aeca89450d7e5f66621f679d4c038f8d", features = ["std", "truetype"] }
+denise-winit = { git = "https://github.com/bisand/denise", rev = "24cda989aeca89450d7e5f66621f679d4c038f8d", features = ["gpu"] }
 arboard = { version = "3", default-features = false }
 # The platform's open, save and question dialogs.
 rfd = "0.15"
-# Where the list of recent files is kept.
+# Where the list of recent files, the settings and the open tabs are kept.
 dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
 
 # The menu bar is the system's on macOS; everywhere else it is DeniseUI's, in
 # the window.
