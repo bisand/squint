@@ -50,6 +50,7 @@ index instead of the lines, and show the file before it has been counted.
 | ⌘F | Find. Enter for the next match, Shift+Enter for the previous, Esc to close |
 | ⌘G / ⇧⌘G, F3 / ⇧F3 | Next / previous match of the last search, with the field closed |
 | ⌘L | Go to line |
+| ⇧⌘F | Format JSON or XML into a new file, and open it |
 | ⌘Z / ⇧⌘Z | Undo / redo |
 
 Find walks the file in slices between frames, like the index, so a search
@@ -62,18 +63,18 @@ rules; the one a search landed on is selected over the marks.
 cargo run --release -- /var/log/system.log
 cargo run --release -- --time /var/log/system.log        # no window: how long the parts take
 cargo run --release -- --snapshot out.ppm 2 some.log 1 error   # no window: one frame at 2x, at the first "error"
+cargo run --release -- --format dump.json pretty.json          # no window: pretty-print to a file, or to stdout
 ```
 
 ## Roadmap
 
 1. An open dialog.
 2. IME composition forwarded from winit into the text area.
-3. Streaming pretty-printers for JSON and XML.
-4. Highlighting: line-local rules first, then `syntect` with state snapshots,
+3. Highlighting: line-local rules first, then `syntect` with state snapshots,
    through the widget's `spans` hook.
-5. Conflict detection when the file changes underneath.
-6. Long lines: a single-line multi-gigabyte JSON breaks line-based paging and
-   needs chunked lines.
+4. Conflict detection when the file changes underneath.
+5. Long lines: a single-line multi-gigabyte JSON still has to be formatted
+   before it can be paged through; chunked lines would let it be read as is.
 
 ## License
 

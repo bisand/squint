@@ -7,7 +7,7 @@
 //! front end can run the scan on a background thread in slices and show the
 //! lines it has already passed while the count is still unknown.
 
-use crate::source::{after_nth_newline, count_newlines, Source};
+use crate::source::{Source, after_nth_newline, count_newlines};
 use std::io;
 
 /// Lines per checkpoint. ctail uses the same figure.
@@ -98,7 +98,9 @@ impl LineIndex {
         }
         let k = self.checkpoints.partition_point(|&c| c <= offset) - 1;
         let base = k as u64 * self.stride;
-        Ok(Some(base + count_newlines(source, self.checkpoints[k], offset)?))
+        Ok(Some(
+            base + count_newlines(source, self.checkpoints[k], offset)?,
+        ))
     }
 
     /// Newlines in `[from, to)`. `from` must lie within the scanned prefix;
@@ -114,7 +116,9 @@ impl LineIndex {
             let b = self.newlines_before(source, to)?.unwrap_or(self.newlines);
             return Ok(Some(b - a));
         }
-        Ok(Some(self.newlines - a + count_newlines(source, self.scanned, to)?))
+        Ok(Some(
+            self.newlines - a + count_newlines(source, self.scanned, to)?,
+        ))
     }
 
     /// Byte offset where 0-based line `n` starts, or `None` if the scan has

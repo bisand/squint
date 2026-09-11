@@ -18,8 +18,8 @@
 //! fine for the light editing squint is for, and the place to put a tree if
 //! it ever is not.
 
-use crate::index::{LineIndex, DEFAULT_STRIDE};
-use crate::source::{after_nth_newline, FileSource, MemSource, Source};
+use crate::index::{DEFAULT_STRIDE, LineIndex};
+use crate::source::{FileSource, MemSource, Source, after_nth_newline};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -150,7 +150,12 @@ impl Document {
     /// is on disk.
     pub fn memory_bytes(&self) -> usize {
         let piece = std::mem::size_of::<Piece>();
-        let lists = self.undo.iter().chain(&self.redo).map(|l| l.capacity()).sum::<usize>()
+        let lists = self
+            .undo
+            .iter()
+            .chain(&self.redo)
+            .map(|l| l.capacity())
+            .sum::<usize>()
             + self.pieces.capacity()
             + self.clean.capacity();
         self.index.memory_bytes() + self.added.capacity() + lists * piece
@@ -366,10 +371,14 @@ impl Document {
                 let bytes = &self.added[p.start as usize..(p.start + rel) as usize];
                 Ok(Some(bytecount::count(bytes, b'\n') as u64))
             }
-            Buf::Original if rel <= DIRECT_COUNT_LIMIT => {
-                Ok(Some(crate::source::count_newlines(&*self.source, p.start, p.start + rel)?))
-            }
-            Buf::Original => self.index.newlines_in(&*self.source, p.start, p.start + rel),
+            Buf::Original if rel <= DIRECT_COUNT_LIMIT => Ok(Some(crate::source::count_newlines(
+                &*self.source,
+                p.start,
+                p.start + rel,
+            )?)),
+            Buf::Original => self
+                .index
+                .newlines_in(&*self.source, p.start, p.start + rel),
         }
     }
 
@@ -639,7 +648,11 @@ mod tests {
         assert_eq!(d.line_count().unwrap(), None);
         assert_eq!(d.known_lines().unwrap(), 6);
         assert_eq!(d.line(4).unwrap().as_deref(), Some("line 5"));
-        assert_eq!(d.line(5).unwrap().as_deref(), Some("line 6"), "the line under scan is readable");
+        assert_eq!(
+            d.line(5).unwrap().as_deref(),
+            Some("line 6"),
+            "the line under scan is readable"
+        );
         assert_eq!(d.line(6).unwrap(), None);
 
         // Editing inside the scanned prefix works while the scan runs.
@@ -661,7 +674,11 @@ mod tests {
         let mut d = indexed("one\ntwo\nthree");
         let at = |d: &mut Document, off| d.line_col_of(off).unwrap();
         assert_eq!(at(&mut d, 0), Some((0, 0)));
-        assert_eq!(at(&mut d, 3), Some((0, 3)), "the newline is the end of its line");
+        assert_eq!(
+            at(&mut d, 3),
+            Some((0, 3)),
+            "the newline is the end of its line"
+        );
         assert_eq!(at(&mut d, 4), Some((1, 0)));
         assert_eq!(at(&mut d, 6), Some((1, 2)));
         assert_eq!(at(&mut d, 13), Some((2, 5)), "the very end");
@@ -670,7 +687,11 @@ mod tests {
         d.insert(4, "new\nline ").unwrap();
         assert_eq!(text_of(&d), "one\nnew\nline two\nthree");
         assert_eq!(at(&mut d, 8), Some((2, 0)));
-        assert_eq!(at(&mut d, 13), Some((2, 5)), "across the seam into the original");
+        assert_eq!(
+            at(&mut d, 13),
+            Some((2, 5)),
+            "across the seam into the original"
+        );
         assert_eq!(at(&mut d, 17), Some((3, 0)));
     }
 
@@ -680,7 +701,10 @@ mod tests {
         assert!(!d.is_modified());
         d.index_complete().unwrap();
         assert_eq!(d.line_count().unwrap(), Some(3));
-        assert!(!d.is_modified(), "the index filled in newline counts, nothing more");
+        assert!(
+            !d.is_modified(),
+            "the index filled in newline counts, nothing more"
+        );
         d.insert(0, "x").unwrap();
         assert!(d.is_modified());
         assert!(d.undo());
@@ -731,7 +755,10 @@ mod tests {
         d.save_to(&path).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "alpha\nb is for beta\n");
         assert!(!d.is_modified());
-        assert!(fs::read_dir(dir.path()).unwrap().count() == 1, "no temp file left");
+        assert!(
+            fs::read_dir(dir.path()).unwrap().count() == 1,
+            "no temp file left"
+        );
         // The document still reads its original through the open handle.
         assert_eq!(d.line(1).unwrap().as_deref(), Some("b is for beta"));
     }

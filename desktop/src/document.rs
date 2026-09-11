@@ -6,8 +6,10 @@
 //! the document came from so it can go back there.
 
 use denise_ui::widgets::{Pos, TextDocument};
+use squint_core::format::{Format, Indent, Kind};
 use squint_core::{Document, Find, FindStep, Needle};
 use std::borrow::Cow;
+use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -131,6 +133,28 @@ impl FileDocument {
     /// find uses; an empty query marks nothing.
     pub fn set_highlight(&mut self, query: &str) {
         self.highlight = (!query.is_empty()).then(|| Needle::new(query));
+    }
+
+    /// The first `n` bytes, for telling what kind of file this is.
+    pub fn head(&self, n: usize) -> Vec<u8> {
+        self.doc.read(0, n).unwrap_or_default()
+    }
+
+    /// A format of this document as `kind`, to be stepped with
+    /// [`format_step`](Self::format_step).
+    pub fn format(&self, kind: Kind, indent: Indent) -> Format {
+        Format::new(&self.doc, kind, indent)
+    }
+
+    /// Advances `job` by up to `budget` bytes, writing into `w`. Returns
+    /// whether it has finished.
+    pub fn format_step<W: Write>(
+        &self,
+        job: &mut Format,
+        budget: usize,
+        w: &mut W,
+    ) -> std::io::Result<bool> {
+        job.step(&self.doc, budget, w)
     }
 }
 

@@ -120,7 +120,11 @@ impl Find {
         } else {
             [(0, from), (from, len)]
         };
-        let cursor = if forward { segments[0].0 } else { segments[0].1 };
+        let cursor = if forward {
+            segments[0].0
+        } else {
+            segments[0].1
+        };
         Self {
             needle,
             forward,
@@ -225,9 +229,17 @@ mod tests {
     fn forwards_finds_the_first_match_at_or_after_the_origin() {
         let d = Document::from_text("cat dog cat dog");
         assert_eq!(run(&d, "dog", 0, true, 100), found(4, false));
-        assert_eq!(run(&d, "dog", 4, true, 100), found(4, false), "at the origin counts");
+        assert_eq!(
+            run(&d, "dog", 4, true, 100),
+            found(4, false),
+            "at the origin counts"
+        );
         assert_eq!(run(&d, "dog", 5, true, 100), found(12, false));
-        assert_eq!(run(&d, "dog", 13, true, 100), found(4, true), "past the end wraps");
+        assert_eq!(
+            run(&d, "dog", 13, true, 100),
+            found(4, true),
+            "past the end wraps"
+        );
         assert_eq!(run(&d, "bird", 3, true, 100), FindStep::NotFound);
     }
 
@@ -235,8 +247,16 @@ mod tests {
     fn backwards_finds_the_last_match_before_the_origin() {
         let d = Document::from_text("cat dog cat dog");
         assert_eq!(run(&d, "cat", 15, false, 100), found(8, false));
-        assert_eq!(run(&d, "cat", 8, false, 100), found(0, false), "the origin does not count");
-        assert_eq!(run(&d, "cat", 0, false, 100), found(8, true), "past the start wraps");
+        assert_eq!(
+            run(&d, "cat", 8, false, 100),
+            found(0, false),
+            "the origin does not count"
+        );
+        assert_eq!(
+            run(&d, "cat", 0, false, 100),
+            found(8, true),
+            "past the start wraps"
+        );
         assert_eq!(run(&d, "bird", 9, false, 100), FindStep::NotFound);
     }
 
@@ -245,8 +265,16 @@ mod tests {
         let text: String = "x".repeat(50) + "needle" + &"y".repeat(50);
         let d = Document::from_text(&text);
         for budget in 1..12 {
-            assert_eq!(run(&d, "needle", 0, true, budget), found(50, false), "budget {budget}");
-            assert_eq!(run(&d, "needle", 106, false, budget), found(50, false), "budget {budget}");
+            assert_eq!(
+                run(&d, "needle", 0, true, budget),
+                found(50, false),
+                "budget {budget}"
+            );
+            assert_eq!(
+                run(&d, "needle", 106, false, budget),
+                found(50, false),
+                "budget {budget}"
+            );
         }
     }
 
@@ -299,7 +327,15 @@ mod tests {
         // "one\ninserted two\nthree": the match runs from the added text
         // into the original, starting at the `t` of "inserted".
         assert_eq!(run(&d, "ted two", 0, true, 3), found(9, false));
-        assert_eq!(run(&d, "", 0, true, 3), FindStep::NotFound, "nothing to find");
-        assert_eq!(run(&d, &"z".repeat(100), 0, true, 3), FindStep::NotFound, "longer than the text");
+        assert_eq!(
+            run(&d, "", 0, true, 3),
+            FindStep::NotFound,
+            "nothing to find"
+        );
+        assert_eq!(
+            run(&d, &"z".repeat(100), 0, true, 3),
+            FindStep::NotFound,
+            "longer than the text"
+        );
     }
 }

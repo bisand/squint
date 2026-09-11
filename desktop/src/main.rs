@@ -22,16 +22,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `squint --time <file>`: no window, just how long the parts take.
         return time(args.get(1).map(PathBuf::from));
     }
+    if args.first().map(String::as_str) == Some("--format") {
+        // `squint --format <file> [out]`: no window, the file pretty-printed
+        // as a stream into `out`, or to stdout.
+        return format_file(
+            args.get(1).map(PathBuf::from),
+            args.get(2).map(PathBuf::from),
+        );
+    }
     if args.first().map(String::as_str) == Some("--snapshot") {
-        // `squint --snapshot out.ppm [scale] [file] [line] [find]`: one frame,
-        // no window, scrolled to `line` and then to the first match of `find`
-        // after it. How a layout is reviewed over SSH and how the README's
-        // pictures are made.
-        let out = args.get(1).cloned().unwrap_or_else(|| "squint.ppm".into());
+        // `squint --snapshot out.ppm [scale] [file] [line] [find] [--formatted]`:
+        // one frame, no window, scrolled to `line` and then to the first match
+        // of `find` after it; with `--formatted`, of the file as ⇧⌘F formats
+        // it. How a layout is reviewed over SSH and how the README's pictures
+        // are made.
+        let formatted = args.iter().any(|a| a == "--formatted");
+        let args: Vec<&str> = args
+            .iter()
+            .map(String::as_str)
+            .filter(|a| *a != "--formatted")
+            .collect();
+        let out = args.get(1).copied().unwrap_or("squint.ppm");
         let scale: f32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(2.0);
+        let path = args.get(3).map(PathBuf::from);
         let line: Option<usize> = args.get(4).and_then(|a| a.parse().ok());
-        let query = args.get(5).cloned();
-        return snapshot(&out, scale, args.get(3).map(PathBuf::from), line, query);
+        let query = args.get(5).map(|a| a.to_string());
+        return snapshot(out, scale, path, formatted, line, query);
     }
     let path: Option<PathBuf> = args
         .iter()
@@ -64,6 +80,7 @@ fn snapshot(
     out: &str,
     scale: f32,
     path: Option<PathBuf>,
+    formatted: bool,
     line: Option<usize>,
     query: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -76,6 +93,9 @@ fn snapshot(
         (logical.height as f32 * scale + 0.5) as u32,
     );
     let mut app = app::App::new(size, scale, path.as_deref());
+    if formatted {
+        app.format_now();
+    }
     app.index_all();
     let mut pixels = vec![0u32; (size.width * size.height) as usize];
     let mut paint = |app: &mut app::App| {
@@ -110,6 +130,48 @@ fn snapshot(
     }
     file.flush()?;
     eprintln!("wrote {out} at {}x{}", size.width, size.height);
+    Ok(())
+}
+
+/// Pretty-prints a JSON or XML file as a stream, into a file or to stdout.
+fn format_file(
+    input: Option<PathBuf>,
+    output: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use squint_core::Document;
+    use squint_core::format::{self, Indent};
+    use std::io::Write as _;
+    use std::time::Instant;
+
+    let Some(input) = input else {
+        eprintln!("usage: squint --format <file> [out]");
+        std::process::exit(2);
+    };
+    let doc = Document::open(&input)?;
+    let head = doc.read(0, 8192)?;
+    let Some(kind) = format::detect(Some(&input), &head) else {
+        eprintln!("squint: {}: not JSON or XML", input.display());
+        std::process::exit(1);
+    };
+    let started = Instant::now();
+    let mut w: Box<dyn std::io::Write> = match &output {
+        Some(out) => Box::new(std::io::BufWriter::with_capacity(
+            1 << 20,
+            std::fs::File::create(out)?,
+        )),
+        None => Box::new(std::io::BufWriter::with_capacity(
+            1 << 20,
+            std::io::stdout().lock(),
+        )),
+    };
+    format::format_document(&doc, kind, Indent::default(), &mut w)?;
+    w.flush()?;
+    eprintln!(
+        "squint: formatted {} MB of {} in {:.2?}",
+        doc.len() / 1_000_000,
+        kind.name(),
+        started.elapsed()
+    );
     Ok(())
 }
 

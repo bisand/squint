@@ -8,15 +8,18 @@
 use crate::document::FileDocument;
 use crate::fonts;
 use denise::{
-    BufferAge, DamageTracker, ElementState, Frame, InputEvent, KeyCode, Modifiers, Pen, Rect,
-    Size, theme,
+    BufferAge, DamageTracker, ElementState, Frame, InputEvent, KeyCode, Modifiers, Pen, Rect, Size,
+    theme,
 };
 use denise_text::TextStyle;
 use denise_ui::widgets::{ClipboardRequest, Label, TextArea, TextInput};
 use denise_ui::{Anchors, NodeId, Ui};
 use denise_winit::{DeniseApp, Present, WindowConfig};
+use squint_core::format::{self, Format, Indent, Kind};
 use squint_core::{Find, FindStep};
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Bytes indexed per step: a few milliseconds from the page cache.
@@ -24,6 +27,9 @@ const INDEX_SLICE: usize = 8 * 1024 * 1024;
 
 /// Bytes searched per step.
 const FIND_SLICE: usize = 4 * 1024 * 1024;
+
+/// Bytes formatted per step.
+const FORMAT_SLICE: usize = 4 * 1024 * 1024;
 
 /// How long one frame may spend walking the file, indexing or finding.
 const SLICE_TIME: Duration = Duration::from_millis(6);
@@ -60,12 +66,23 @@ struct Search {
     hit: Option<(u64, bool)>,
 }
 
+/// A format on its way into a new file.
+struct Formatting {
+    job: Format,
+    writer: BufWriter<File>,
+    /// Where it is being written: beside `out`, renamed to it when complete,
+    /// so a half-written file is never opened.
+    part: PathBuf,
+    out: PathBuf,
+}
+
 pub struct App {
     ui: Ui<Msg>,
     editor: NodeId,
     status: NodeId,
     prompt: Option<Prompt>,
     search: Option<Search>,
+    formatting: Option<Formatting>,
     /// The last thing searched for, so ⌘G and F3 have something to find with
     /// the field closed, and the field opens holding it.
     last_query: String,
@@ -153,6 +170,7 @@ impl App {
             status,
             prompt: None,
             search: None,
+            formatting: None,
             last_query: String::new(),
             highlighted: String::new(),
             scale,
@@ -202,6 +220,15 @@ impl App {
         }
     }
 
+    /// Formats the file as ⇧⌘F does and waits for the result to open. For a
+    /// snapshot, which has no frames to spread the work over.
+    pub fn format_now(&mut self) {
+        self.start_format();
+        while self.formatting.is_some() {
+            self.pump_format();
+        }
+    }
+
     fn editor(&mut self) -> &mut TextArea<Msg, FileDocument> {
         self.ui
             .widget_mut::<TextArea<Msg, FileDocument>>(self.editor)
@@ -243,7 +270,11 @@ impl App {
         let px = |v: f32| (v * self.scale + 0.5) as u16;
         let s = |v: i32| (v as f32 * self.scale + 0.5) as i32;
         let (hint, max_chars, text) = match ask {
-            Ask::GoTo => ("Go to line — Enter to jump, Esc to close", 12, String::new()),
+            Ask::GoTo => (
+                "Go to line — Enter to jump, Esc to close",
+                12,
+                String::new(),
+            ),
             Ask::Find => (
                 "Find — Enter for next, Shift+Enter for previous, Esc to close",
                 512,
@@ -444,6 +475,123 @@ impl App {
         }
     }
 
+    // ---- formatting ---------------------------------------------------------
+
+    /// Pretty-prints the file as JSON or XML into a new file, a slice per
+    /// frame, and opens that in this one's place when it is complete.
+    fn start_format(&mut self) {
+        if self.formatting.is_some() {
+            return;
+        }
+        let (modified, path, head) = {
+            let doc = self.editor_ref().document();
+            (
+                doc.is_modified(),
+                doc.path().map(Path::to_path_buf),
+                doc.head(8192),
+            )
+        };
+        if modified {
+            self.say("save first: the formatted file opens in place of this one".into());
+            return;
+        }
+        let Some(kind) = format::detect(path.as_deref(), &head) else {
+            self.say("not JSON or XML: nothing to format".into());
+            return;
+        };
+        let out = formatted_path(path.as_deref(), kind);
+        let part = part_path(&out);
+        let created = fs::create_dir_all(out.parent().unwrap_or(Path::new(".")))
+            .and_then(|()| File::create(&part));
+        let file = match created {
+            Ok(file) => file,
+            Err(e) => {
+                self.say(format!("formatting: {}: {e}", part.display()));
+                return;
+            }
+        };
+        let job = self.editor_ref().document().format(kind, Indent::default());
+        self.formatting = Some(Formatting {
+            job,
+            writer: BufWriter::with_capacity(1 << 20, file),
+            part,
+            out,
+        });
+        self.pump_format();
+    }
+
+    /// Formats for a few milliseconds.
+    fn pump_format(&mut self) {
+        let Some(mut running) = self.formatting.take() else {
+            return;
+        };
+        let deadline = Instant::now() + SLICE_TIME;
+        let step = {
+            let doc = self.editor_ref().document();
+            loop {
+                match doc.format_step(&mut running.job, FORMAT_SLICE, &mut running.writer) {
+                    Ok(false) if Instant::now() < deadline => {}
+                    other => break other,
+                }
+            }
+        };
+        match step {
+            Ok(false) => {
+                let (done, total) = running.job.progress();
+                let percent = done * 100 / total.max(1);
+                let kind = running.job.kind().name();
+                self.say(format!("formatting as {kind}… {percent}%"));
+                self.formatting = Some(running);
+            }
+            Ok(true) => self.finish_format(running),
+            Err(e) => {
+                let _ = fs::remove_file(&running.part);
+                self.say(format!("formatting: {e}"));
+            }
+        }
+    }
+
+    /// Puts the finished file in place and opens it.
+    fn finish_format(&mut self, running: Formatting) {
+        let Formatting {
+            job,
+            writer,
+            part,
+            out,
+        } = running;
+        let saved = writer
+            .into_inner()
+            .map_err(|e| e.into_error())
+            .and_then(|file| file.sync_all())
+            .and_then(|()| fs::rename(&part, &out));
+        if let Err(e) = saved {
+            let _ = fs::remove_file(&part);
+            self.say(format!("formatting: {e}"));
+            return;
+        }
+        match FileDocument::open(&out) {
+            Ok(doc) => {
+                self.editor().set_document(doc);
+                self.title = format!("{} — squint", name_of(&out));
+                self.search = None;
+                // The new document marks nothing yet; an open find field
+                // sets it again on the next frame.
+                self.highlighted.clear();
+                let kind = job.kind().name();
+                self.say(format!("formatted as {kind} into {}", out.display()));
+            }
+            Err(e) => self.say(format!("{}: {e}", out.display())),
+        }
+    }
+
+    fn cancel_format(&mut self, why: &str) {
+        if let Some(running) = self.formatting.take() {
+            drop(running.writer);
+            let _ = fs::remove_file(&running.part);
+            self.say(format!("formatting stopped: {why}"));
+        }
+    }
+
     // ---- the rest -----------------------------------------------------------
 
     fn save(&mut self) {
@@ -464,7 +612,11 @@ impl App {
         let lines = if doc.is_indexed() {
             format!("{} lines", line_count(doc))
         } else {
-            let percent = if total == 0 { 100 } else { scanned * 100 / total };
+            let percent = if total == 0 {
+                100
+            } else {
+                scanned * 100 / total
+            };
             format!("counting… {percent}%")
         };
         let held = doc.memory_bytes() / 1024;
@@ -482,13 +634,20 @@ impl App {
             label.set_text(text);
         }
         let base = self.title.trim_start_matches('•').trim_start().to_string();
-        self.title = if modified { format!("• {base}") } else { base };
+        self.title = if modified {
+            format!("• {base}")
+        } else {
+            base
+        };
     }
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            // The offsets a search has covered moved with the edit.
-            Msg::Changed => self.search = None,
+            // What a search or a format has read moved with the edit.
+            Msg::Changed => {
+                self.search = None;
+                self.cancel_format("the text changed");
+            }
             Msg::Submit => self.submit(),
             Msg::Clipboard(ClipboardRequest::Copy(text) | ClipboardRequest::Cut(text)) => {
                 if let Some(clip) = &mut self.clipboard
@@ -547,6 +706,31 @@ fn line_count(doc: &mut FileDocument) -> usize {
     doc.line_count().unwrap_or(0)
 }
 
+/// Where a formatted copy of `path` goes: the system's temporary directory,
+/// under the file's name with `-formatted` before the extension. It keeps the
+/// extension that says what it is, and can never be the file it came from.
+fn formatted_path(path: Option<&Path>, kind: Kind) -> PathBuf {
+    let stem = path
+        .and_then(Path::file_stem)
+        .map_or_else(|| "untitled".into(), |s| s.to_string_lossy().into_owned());
+    let ext = path.and_then(Path::extension).map_or_else(
+        || match kind {
+            Kind::Json => "json".to_string(),
+            Kind::Xml => "xml".to_string(),
+        },
+        |e| e.to_string_lossy().into_owned(),
+    );
+    std::env::temp_dir()
+        .join("squint")
+        .join(format!("{stem}-formatted.{ext}"))
+}
+
+fn part_path(out: &Path) -> PathBuf {
+    let mut name = out.as_os_str().to_owned();
+    name.push(".part");
+    PathBuf::from(name)
+}
+
 fn name_of(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -594,10 +778,16 @@ impl DeniseApp for App {
                     state: ElementState::Down,
                     modifiers,
                     ..
-                } if modifiers.contains(Modifiers::SUPER) || modifiers.contains(Modifiers::CTRL) => {
+                } if modifiers.contains(Modifiers::SUPER)
+                    || modifiers.contains(Modifiers::CTRL) =>
+                {
                     match code {
                         KeyCode::S => {
                             self.save();
+                            continue;
+                        }
+                        KeyCode::F if modifiers.contains(Modifiers::SHIFT) => {
+                            self.start_format();
                             continue;
                         }
                         KeyCode::F => {
@@ -632,6 +822,7 @@ impl DeniseApp for App {
         self.sync_highlight();
         self.pump_index();
         self.pump_find();
+        self.pump_format();
         if !forwarded.is_empty() {
             self.refresh_status();
         }
@@ -667,7 +858,10 @@ impl DeniseApp for App {
     }
 
     fn next_frame_in(&self) -> Option<Duration> {
-        if !self.editor_ref().document().is_indexed() || self.search.is_some() {
+        if !self.editor_ref().document().is_indexed()
+            || self.search.is_some()
+            || self.formatting.is_some()
+        {
             // Straight back: there is a slice of the file to walk.
             return Some(Duration::ZERO);
         }
