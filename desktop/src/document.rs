@@ -6,7 +6,7 @@
 //! the document came from so it can go back there.
 
 use denise_ui::widgets::{Pos, TextDocument};
-use squint_core::Document;
+use squint_core::{Document, Find, FindStep};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
@@ -82,12 +82,42 @@ impl FileDocument {
         self.error.take()
     }
 
-    fn offset(&mut self, at: Pos) -> Option<u64> {
+    /// The document offset of `at`, or `None` if its line is not known yet.
+    pub fn offset_of(&mut self, at: Pos) -> Option<u64> {
         match self.doc.line_start(at.line as u64) {
             Ok(start) => start.map(|s| s + at.col as u64),
             Err(e) => {
                 self.error = Some(e.to_string());
                 None
+            }
+        }
+    }
+
+    /// The position of document offset `off`, or `None` if the index has not
+    /// reached it.
+    pub fn pos_of(&mut self, off: u64) -> Option<Pos> {
+        match self.doc.line_col_of(off) {
+            Ok(at) => at.map(|(line, col)| Pos::new(line as usize, col as usize)),
+            Err(e) => {
+                self.error = Some(e.to_string());
+                None
+            }
+        }
+    }
+
+    /// A search for `query` from offset `from`.
+    pub fn find(&self, query: &str, from: u64, forward: bool) -> Find {
+        Find::new(&self.doc, query, from, forward)
+    }
+
+    /// Advances `find` by up to `budget` bytes. An I/O error ends the search
+    /// and is kept for the status line.
+    pub fn find_step(&mut self, find: &mut Find, budget: usize) -> FindStep {
+        match find.step(&self.doc, budget) {
+            Ok(step) => step,
+            Err(e) => {
+                self.error = Some(format!("finding: {e}"));
+                FindStep::NotFound
             }
         }
     }
@@ -113,7 +143,7 @@ impl TextDocument for FileDocument {
     }
 
     fn insert(&mut self, at: Pos, text: &str) {
-        if let Some(off) = self.offset(at)
+        if let Some(off) = self.offset_of(at)
             && let Err(e) = self.doc.insert(off, text)
         {
             self.error = Some(e.to_string());
@@ -121,10 +151,12 @@ impl TextDocument for FileDocument {
     }
 
     fn delete(&mut self, from: Pos, to: Pos) {
-        let (Some(a), Some(b)) = (self.offset(from), self.offset(to)) else {
+        let (Some(a), Some(b)) = (self.offset_of(from), self.offset_of(to)) else {
             return;
         };
-        if b > a && let Err(e) = self.doc.delete(a, b - a) {
+        if b > a
+            && let Err(e) = self.doc.delete(a, b - a)
+        {
             self.error = Some(e.to_string());
         }
     }

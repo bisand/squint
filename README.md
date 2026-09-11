@@ -41,18 +41,31 @@ index instead of the lines, and show the file before it has been counted.
   [DeniseUI](https://github.com/bisand/denise), its `TextArea` widget editing
   the engine's document through the toolkit's `TextDocument` trait, so the
   widget never learns how big the file is. The line index is built in slices
-  between frames while the status line counts up. ⌘S / Ctrl+S saves, ⌘L /
-  Ctrl+L goes to a line; copy, cut and paste go through the system clipboard.
+  between frames while the status line counts up. Copy, cut and paste go
+  through the system clipboard.
+
+| Keys (⌘ on macOS, Ctrl elsewhere) | |
+|---|---|
+| ⌘S | Save |
+| ⌘F | Find. Enter for the next match, Shift+Enter for the previous, Esc to close |
+| ⌘G / ⇧⌘G, F3 / ⇧F3 | Next / previous match of the last search, with the field closed |
+| ⌘L | Go to line |
+| ⌘Z / ⇧⌘Z | Undo / redo |
+
+Find walks the file in slices between frames, like the index, so a search
+through gigabytes keeps the window drawing and shows how far it has got. A
+query with no capital letters ignores ASCII case.
 
 ```bash
 cargo run --release -- /var/log/system.log
 cargo run --release -- --time /var/log/system.log        # no window: how long the parts take
-cargo run --release -- --snapshot out.ppm 2 some.log     # no window: one frame, at 2x
+cargo run --release -- --snapshot out.ppm 2 some.log 1 error   # no window: one frame at 2x, at the first "error"
 ```
 
 ## Roadmap
 
-1. Find, and an open dialog.
+1. An open dialog, and every match on screen highlighted rather than only the
+   selected one.
 2. IME composition forwarded from winit into the text area.
 3. Streaming pretty-printers for JSON and XML.
 4. Highlighting: line-local rules first, then `syntect` with state snapshots,

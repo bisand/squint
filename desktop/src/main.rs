@@ -23,13 +23,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return time(args.get(1).map(PathBuf::from));
     }
     if args.first().map(String::as_str) == Some("--snapshot") {
-        // `squint --snapshot out.ppm [scale] [file] [line]`: one frame, no
-        // window, scrolled to `line`. How a layout is reviewed over SSH and
-        // how the README's pictures are made.
+        // `squint --snapshot out.ppm [scale] [file] [line] [find]`: one frame,
+        // no window, scrolled to `line` and then to the first match of `find`
+        // after it. How a layout is reviewed over SSH and how the README's
+        // pictures are made.
         let out = args.get(1).cloned().unwrap_or_else(|| "squint.ppm".into());
         let scale: f32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(2.0);
         let line: Option<usize> = args.get(4).and_then(|a| a.parse().ok());
-        return snapshot(&out, scale, args.get(3).map(PathBuf::from), line);
+        let query = args.get(5).cloned();
+        return snapshot(&out, scale, args.get(3).map(PathBuf::from), line, query);
     }
     let path: Option<PathBuf> = args
         .iter()
@@ -63,6 +65,7 @@ fn snapshot(
     scale: f32,
     path: Option<PathBuf>,
     line: Option<usize>,
+    query: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use denise::{BufferAge, Frame, PixelFormat, Size};
     use std::io::Write as _;
@@ -91,6 +94,13 @@ fn snapshot(
         // A jump centres on the rows the last paint saw, so it comes after
         // one; then the frame is drawn again where it landed.
         app.go_to_line(line);
+        paint(&mut app);
+    }
+    if let Some(query) = query {
+        // The widget scrolls sideways to a match when it next paints, so
+        // the frame is drawn once to settle that and once to be kept.
+        app.find_now(&query);
+        paint(&mut app);
         paint(&mut app);
     }
     let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);

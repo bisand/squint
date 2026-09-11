@@ -216,6 +216,37 @@ impl Document {
         Ok((n == line).then_some(off))
     }
 
+    /// The 0-based line holding document offset `off`, and the byte column
+    /// within it, or `None` if the index has not reached that far.
+    pub fn line_col_of(&mut self, off: u64) -> io::Result<Option<(u64, u64)>> {
+        self.resolve()?;
+        let mut line = 0;
+        let mut pos = 0;
+        let mut inside = false;
+        for p in &self.pieces {
+            if off < pos + p.len {
+                match self.newlines_in_prefix(p, off - pos)? {
+                    Some(nl) => line += nl,
+                    None => return Ok(None),
+                }
+                inside = true;
+                break;
+            }
+            match p.newlines {
+                Some(nl) => line += nl,
+                None => return Ok(None),
+            }
+            pos += p.len;
+        }
+        if !inside && off > pos {
+            return Ok(None);
+        }
+        let Some(start) = self.line_start(line)? else {
+            return Ok(None);
+        };
+        Ok(Some((line, off - start)))
+    }
+
     /// Offset within `p` of its `rel`-th line: 0 for the line running into
     /// the piece, else just past its `rel`-th newline.
     fn nth_line_in(&self, p: &Piece, rel: u64) -> io::Result<Option<u64>> {
@@ -623,6 +654,24 @@ mod tests {
         assert_eq!(d.known_lines().unwrap(), 52);
         assert_eq!(d.line(50).unwrap().as_deref(), Some("line 50"));
         assert_eq!(d.line(51).unwrap().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn offsets_map_back_to_lines_and_columns() {
+        let mut d = indexed("one\ntwo\nthree");
+        let at = |d: &mut Document, off| d.line_col_of(off).unwrap();
+        assert_eq!(at(&mut d, 0), Some((0, 0)));
+        assert_eq!(at(&mut d, 3), Some((0, 3)), "the newline is the end of its line");
+        assert_eq!(at(&mut d, 4), Some((1, 0)));
+        assert_eq!(at(&mut d, 6), Some((1, 2)));
+        assert_eq!(at(&mut d, 13), Some((2, 5)), "the very end");
+        assert_eq!(at(&mut d, 14), None, "past it");
+
+        d.insert(4, "new\nline ").unwrap();
+        assert_eq!(text_of(&d), "one\nnew\nline two\nthree");
+        assert_eq!(at(&mut d, 8), Some((2, 0)));
+        assert_eq!(at(&mut d, 13), Some((2, 5)), "across the seam into the original");
+        assert_eq!(at(&mut d, 17), Some((3, 0)));
     }
 
     #[test]
