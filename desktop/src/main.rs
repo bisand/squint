@@ -8,8 +8,13 @@
 mod app;
 mod document;
 mod fonts;
+mod menu;
+#[cfg(target_os = "macos")]
+mod native_menu;
+mod recent;
 
 use denise_winit::{Error, Present, run_with};
+use recent::Recent;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,23 +36,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if args.first().map(String::as_str) == Some("--snapshot") {
-        // `squint --snapshot out.ppm [scale] [file] [line] [find] [--formatted]`:
-        // one frame, no window, scrolled to `line` and then to the first match
-        // of `find` after it; with `--formatted`, of the file as ⇧⌘F formats
-        // it. How a layout is reviewed over SSH and how the README's pictures
-        // are made.
+        // `squint --snapshot out.ppm [scale] [file] [line] [find] [--formatted]
+        // [--menu <title>]`: one frame, no window, scrolled to `line` and then
+        // to the first match of `find` after it; with `--formatted`, of the
+        // file as ⇧⌘F formats it; with `--menu`, with that menu open from the
+        // menu bar in the window. How a layout is reviewed over SSH and how the
+        // README's pictures are made.
         let formatted = args.iter().any(|a| a == "--formatted");
+        let menu = args
+            .iter()
+            .position(|a| a == "--menu")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        let mut menu_title = false;
         let args: Vec<&str> = args
             .iter()
             .map(String::as_str)
-            .filter(|a| *a != "--formatted")
+            .filter(|a| {
+                if std::mem::take(&mut menu_title) {
+                    return false;
+                }
+                menu_title = *a == "--menu";
+                !menu_title && *a != "--formatted"
+            })
             .collect();
         let out = args.get(1).copied().unwrap_or("squint.ppm");
         let scale: f32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(2.0);
         let path = args.get(3).map(PathBuf::from);
         let line: Option<usize> = args.get(4).and_then(|a| a.parse().ok());
         let query = args.get(5).map(|a| a.to_string());
-        return snapshot(out, scale, path, formatted, line, query);
+        return snapshot(out, scale, path, formatted, line, query, menu);
     }
     let path: Option<PathBuf> = args
         .iter()
@@ -61,12 +79,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok("software") => Present::Software,
         _ => Present::Gpu,
     };
+    let menus = app::Menus::for_platform();
     let open_path = path.clone();
-    let open = move |size, scale| app::App::new(size, scale, open_path.as_deref());
+    let open =
+        move |size, scale| app::App::new(size, scale, open_path.as_deref(), menus, Recent::load());
     match run_with(app::App::config(present), open) {
         Err(Error::Gpu(reason) | Error::Present(reason)) if present == Present::Gpu => {
             eprintln!("squint: cannot draw through the GPU ({reason}); drawing in software");
-            let open = move |size, scale| app::App::new(size, scale, path.as_deref());
+            let open = move |size, scale| {
+                app::App::new(size, scale, path.as_deref(), menus, Recent::load())
+            };
             run_with(app::App::config(Present::Software), open)?;
             Ok(())
         }
@@ -83,6 +105,7 @@ fn snapshot(
     formatted: bool,
     line: Option<usize>,
     query: Option<String>,
+    menu: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use denise::{BufferAge, Frame, PixelFormat, Size};
     use std::io::Write as _;
@@ -92,7 +115,13 @@ fn snapshot(
         (logical.width as f32 * scale + 0.5) as u32,
         (logical.height as f32 * scale + 0.5) as u32,
     );
-    let mut app = app::App::new(size, scale, path.as_deref());
+    // The window as it is drawn: the system's menus are not in it, so a
+    // snapshot where they are the system's has none, unless one is asked for.
+    let menus = match app::Menus::for_platform() {
+        app::Menus::System if menu.is_none() => app::Menus::Off,
+        _ => app::Menus::Window,
+    };
+    let mut app = app::App::new(size, scale, path.as_deref(), menus, Recent::in_memory());
     if formatted {
         app.format_now();
     }
@@ -122,6 +151,12 @@ fn snapshot(
         // the frame is drawn once to settle that and once to be kept.
         app.find_now(&query);
         paint(&mut app);
+        paint(&mut app);
+    }
+    if let Some(title) = menu {
+        if !app.open_menu_titled(&title) {
+            eprintln!("squint: no menu called {title:?}");
+        }
         paint(&mut app);
     }
     let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);

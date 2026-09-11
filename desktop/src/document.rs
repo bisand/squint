@@ -154,6 +154,20 @@ impl FileDocument {
             .map_err(|e| format!("saving {}: {e}", path.display()))
     }
 
+    /// Writes the document to `path` and makes that its file from now on:
+    /// where Save goes and what decides the grammar.
+    pub fn save_as(&mut self, path: &Path) -> Result<(), String> {
+        self.doc
+            .save_to(path)
+            .map_err(|e| format!("saving {}: {e}", path.display()))?;
+        if self.path.as_deref() != Some(path) {
+            self.path = Some(path.to_path_buf());
+            self.syntax = None;
+            self.syntax_decided = false;
+        }
+        Ok(())
+    }
+
     /// The last error, cleared on the way out.
     pub fn take_error(&mut self) -> Option<String> {
         self.error.take()

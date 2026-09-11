@@ -1,25 +1,39 @@
-//! The window: a text area over the file, and a status line under it.
+//! The window: the menus, a text area over the file, and a status line under
+//! it.
 //!
 //! Work that walks the file — building the line index, finding text — is
 //! done here in slices between frames rather than on a thread: the document
 //! lives inside the widget, a slice is a few milliseconds, and the window
 //! keeps drawing and taking keys while the status line counts up.
+//!
+//! The menus are one list of commands (see [`menu`](crate::menu)), drawn by the
+//! system's menu bar on macOS and by DeniseUI's along the top of the window
+//! everywhere else. A command comes the same way from either, or from its
+//! keys, and [`App::run`] does it.
 
 use crate::document::FileDocument;
 use crate::fonts;
+use crate::menu::{self, Command, State};
+#[cfg(target_os = "macos")]
+use crate::native_menu::NativeMenu;
+use crate::recent::Recent;
 use denise::{
     BufferAge, DamageTracker, ElementState, Frame, InputEvent, KeyCode, Modifiers, Pen, Rect, Size,
     theme,
 };
 use denise_text::TextStyle;
-use denise_ui::widgets::{ClipboardRequest, Label, TextArea, TextInput};
+use denise_ui::widgets::{
+    ClipboardRequest, Label, MenuBar, MenuEvent, TextArea, TextInput, open_menu, shortcut,
+};
 use denise_ui::{Anchors, NodeId, Ui};
 use denise_winit::{DeniseApp, Present, WindowConfig};
+use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use squint_core::editorconfig::{self, Properties};
 use squint_core::format::{self, Format, Kind, Style};
 use squint_core::{Find, FindStep};
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::BufWriter;
+use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -35,12 +49,44 @@ const FORMAT_SLICE: usize = 4 * 1024 * 1024;
 /// How long one frame may spend walking the file, indexing or finding.
 const SLICE_TIME: Duration = Duration::from_millis(6);
 
+/// The text's size in logical pixels, and the sizes Zoom In and Zoom Out step
+/// through.
+const TEXT_SIZE: u16 = 13;
+const TEXT_SIZES: &[u16] = &[8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 32, 40, 48];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Msg {
     Changed,
     Clipboard(ClipboardRequest),
     /// Enter in the prompt's field.
     Submit,
+    /// A title of the menu bar in the window was pressed.
+    MenuTitle(usize),
+    /// What the menu open from that bar did.
+    Menu(MenuEvent),
+}
+
+/// Where the menus are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menus {
+    /// In the system's menu bar: macOS.
+    System,
+    /// DeniseUI's, along the top of the window.
+    Window,
+    /// None: a snapshot of a window whose menus the system draws.
+    Off,
+}
+
+impl Menus {
+    /// The platform's own: the system's bar on macOS, the window's everywhere
+    /// else. `SQUINT_MENU=window` puts them in the window on macOS too.
+    pub fn for_platform() -> Self {
+        if cfg!(target_os = "macos") && std::env::var("SQUINT_MENU").as_deref() != Ok("window") {
+            Menus::System
+        } else {
+            Menus::Window
+        }
+    }
 }
 
 /// What the field in the status line's place is asking for.
@@ -79,19 +125,43 @@ struct Formatting {
     out: PathBuf,
 }
 
+/// A menu open from the bar in the window.
+struct OpenMenu {
+    /// The command behind each row, numbered as a pick is.
+    commands: Vec<Option<Command>>,
+    /// What had the keyboard before the menu took it, to be given it back.
+    focus: Option<NodeId>,
+}
+
 pub struct App {
     ui: Ui<Msg>,
     editor: NodeId,
     status: NodeId,
+    /// DeniseUI's menu bar, when the menus are in the window.
+    bar: Option<NodeId>,
+    open_menu: Option<OpenMenu>,
+    #[cfg(target_os = "macos")]
+    native: Option<NativeMenu>,
+    /// What the system's menus were last brought up to date with.
+    #[cfg(target_os = "macos")]
+    shown: State,
+    recent: Recent,
     prompt: Option<Prompt>,
     search: Option<Search>,
     formatting: Option<Formatting>,
+    /// What the file looks like it could be formatted as, decided when it
+    /// opens.
+    format_kind: Option<Kind>,
     /// The last thing searched for, so ⌘G and F3 have something to find with
     /// the field closed, and the field opens holding it.
     last_query: String,
     /// The query the editor is marking on screen, so it is only reached —
     /// and so repainted — when that changes.
     highlighted: String,
+    /// The face the text is drawn in, and its size in logical pixels.
+    mono: TextStyle,
+    text_size: u16,
+    read_only: bool,
     scale: f32,
     title: String,
     /// What the status line says on the right: the last thing that happened.
@@ -111,26 +181,42 @@ impl App {
         }
     }
 
-    pub fn new(size: Size, scale: f32, path: Option<&Path>) -> Self {
+    pub fn new(
+        size: Size,
+        scale: f32,
+        path: Option<&Path>,
+        menus: Menus,
+        mut recent: Recent,
+    ) -> Self {
         let px = |v: f32| (v * scale + 0.5) as u16;
         let s = |v: i32| (v as f32 * scale + 0.5) as i32;
         let mut ui: Ui<Msg> = Ui::new(size, theme::DARK.scaled(scale));
         ui.show_cursor(false);
-        if let Some((_, source)) = fonts::load(fonts::UI) {
-            let id = ui.add_font(source);
-            ui.set_default_font(id);
-        }
+        let chrome = match fonts::load(fonts::UI) {
+            Some((_, source)) => {
+                let id = ui.add_font(source);
+                ui.set_default_font(id);
+                TextStyle {
+                    font: id,
+                    size_px: px(13.0),
+                }
+            }
+            None => TextStyle::built_in(px(13.0)),
+        };
         let mono = match fonts::load(fonts::MONO) {
             Some((_, source)) => TextStyle {
                 font: ui.add_font(source),
-                size_px: px(13.0),
+                size_px: px(TEXT_SIZE as f32),
             },
-            None => TextStyle::built_in(px(13.0)),
+            None => TextStyle::built_in(px(TEXT_SIZE as f32)),
         };
 
         let (doc, mut notice) = match path {
             Some(path) => match FileDocument::open(path) {
-                Ok(doc) => (doc, String::new()),
+                Ok(doc) => {
+                    recent.add(path);
+                    (doc, String::new())
+                }
                 Err(e) => (FileDocument::empty(), format!("{}: {e}", path.display())),
             },
             None => (FileDocument::empty(), String::new()),
@@ -140,17 +226,33 @@ impl App {
             None => "squint".into(),
         };
         if notice.is_empty() && doc.path().is_none() {
-            notice = "no file: squint <file>".into();
+            notice = format!("no file: {} opens one", shortcut("Cmd+O"));
         }
         // Tab stops as the file's project sets them, or every four columns.
         let tab_width = path
             .map(editorconfig::properties_for)
             .and_then(|props| props.tab_width())
             .unwrap_or(4);
+        let format_kind = format::detect(doc.path(), &doc.head(8192));
 
         let root = ui.root();
         let (w, h) = (size.width as i32, size.height as i32);
         let status_h = s(24);
+        let bar = (menus == Menus::Window).then(|| {
+            let labels: Vec<String> = menu::titles(&State::default(), false)
+                .into_iter()
+                .map(|t| t.label)
+                .collect();
+            let widget = MenuBar::new(labels, Msg::MenuTitle).with_style(chrome);
+            let theme = *ui.theme();
+            let height = widget.preferred_height(&theme, ui.text_mut());
+            let id = ui
+                .add(root, widget, Rect::new(0, 0, w, height))
+                .expect("menu bar");
+            ui.set_anchors(id, TOP_ROW);
+            (id, height)
+        });
+        let bar_h = bar.map_or(0, |(_, height)| height);
         let editor = ui
             .add(
                 root,
@@ -159,7 +261,7 @@ impl App {
                     .with_tab_width(tab_width)
                     .with_change(Msg::Changed)
                     .with_clipboard(Msg::Clipboard),
-                Rect::new(0, 0, w, h - status_h),
+                Rect::new(0, bar_h, w, h - status_h - bar_h),
             )
             .expect("editor");
         ui.set_anchors(editor, ALL_SIDES);
@@ -177,11 +279,22 @@ impl App {
             ui,
             editor,
             status,
+            bar: bar.map(|(id, _)| id),
+            open_menu: None,
+            #[cfg(target_os = "macos")]
+            native: None,
+            #[cfg(target_os = "macos")]
+            shown: State::default(),
+            recent,
             prompt: None,
             search: None,
             formatting: None,
+            format_kind,
             last_query: String::new(),
             highlighted: String::new(),
+            mono,
+            text_size: TEXT_SIZE,
+            read_only: false,
             scale,
             title,
             notice,
@@ -189,6 +302,12 @@ impl App {
             started: Instant::now(),
             exit: false,
         };
+        #[cfg(target_os = "macos")]
+        if menus == Menus::System {
+            let state = app.menu_state();
+            app.native = Some(NativeMenu::new(&menu::titles(&state, true)));
+            app.shown = state;
+        }
         app.refresh_status();
         app
     }
@@ -254,6 +373,24 @@ impl App {
         self.refresh_status();
     }
 
+    /// Opens the menu titled `label` from the bar in the window, as a press
+    /// on its title would. For a snapshot. Whether there was one to open.
+    pub fn open_menu_titled(&mut self, label: &str) -> bool {
+        let index = self
+            .bar
+            .and_then(|bar| self.ui.widget::<MenuBar<Msg>>(bar))
+            .and_then(|bar| {
+                bar.titles()
+                    .iter()
+                    .position(|t| t.eq_ignore_ascii_case(label))
+            });
+        let Some(index) = index else {
+            return false;
+        };
+        self.open_title(index);
+        self.open_menu.is_some()
+    }
+
     fn editor(&mut self) -> &mut TextArea<Msg, FileDocument> {
         self.ui
             .widget_mut::<TextArea<Msg, FileDocument>>(self.editor)
@@ -293,6 +430,445 @@ impl App {
             let deadline = Instant::now() + SLICE_TIME;
             self.editor().document_mut().highlight_until(deadline);
         }
+    }
+
+    // ---- the menus ----------------------------------------------------------
+
+    /// What the menus should show now.
+    fn menu_state(&self) -> State {
+        let (has_file, modified) = {
+            let doc = self.editor_ref().document();
+            (doc.path().is_some(), doc.is_modified())
+        };
+        State {
+            has_file,
+            modified,
+            can_format: self.format_kind.is_some(),
+            read_only: self.read_only,
+            line_numbers: self.editor_ref().gutter(),
+            recent: self.recent.paths().to_vec(),
+        }
+    }
+
+    /// Opens menu `index` of the bar in the window, closing any other.
+    fn open_title(&mut self, index: usize) {
+        let Some(bar) = self.bar else {
+            return;
+        };
+        let focus = match self.open_menu.take() {
+            Some(open) => {
+                self.ui.close_popup();
+                open.focus
+            }
+            None => self.ui.focused(),
+        };
+        let titles = menu::titles(&self.menu_state(), false);
+        let Some(title) = titles.get(index) else {
+            return;
+        };
+        let (items, commands) = menu::rows(&title.entries);
+        if open_menu(&mut self.ui, bar, index, &items, Msg::Menu).is_some() {
+            self.open_menu = Some(OpenMenu { commands, focus });
+            self.light_title(Some(index));
+        } else {
+            self.ui.focus(focus);
+            self.light_title(None);
+        }
+    }
+
+    fn menu_event(&mut self, event: MenuEvent) {
+        match event {
+            MenuEvent::Title(index) => self.open_title(index),
+            MenuEvent::Dismissed => self.close_menu(),
+            MenuEvent::Picked(row) => {
+                let command = self
+                    .open_menu
+                    .as_ref()
+                    .and_then(|open| open.commands.get(row).copied().flatten());
+                self.close_menu();
+                if let Some(command) = command {
+                    self.run(command);
+                }
+            }
+        }
+    }
+
+    /// Closes the menu open from the bar, and gives the keyboard back.
+    fn close_menu(&mut self) {
+        if let Some(open) = self.open_menu.take() {
+            self.ui.close_popup();
+            self.ui.focus(open.focus);
+        }
+        self.light_title(None);
+    }
+
+    /// Escape closes a menu inside the tree without a word to anybody; the
+    /// bar's title is put out and the keyboard given back once it has.
+    fn settle_menu(&mut self) {
+        if self.open_menu.is_some() && !self.ui.popup_open() {
+            self.close_menu();
+        }
+    }
+
+    fn light_title(&mut self, index: Option<usize>) {
+        if let Some(bar) = self.bar
+            && let Some(bar) = self.ui.widget_mut::<MenuBar<Msg>>(bar)
+        {
+            bar.set_open(index);
+        }
+    }
+
+    /// Brings the system's menus up to date with what is true now, when that
+    /// has changed.
+    #[cfg(target_os = "macos")]
+    fn sync_menus(&mut self) {
+        if self.native.is_none() {
+            return;
+        }
+        let state = self.menu_state();
+        if state != self.shown {
+            let titles = menu::titles(&state, true);
+            if let Some(native) = &mut self.native {
+                native.sync(&titles);
+            }
+            self.shown = state;
+        }
+    }
+
+    /// Does what a menu row, or its keys, asks for.
+    fn run(&mut self, command: Command) {
+        match command {
+            Command::New => {
+                if self.may_discard() {
+                    self.load(FileDocument::empty());
+                    self.say("new file".into());
+                }
+            }
+            Command::Open => {
+                if self.may_discard()
+                    && let Some(path) = self.pick_open()
+                {
+                    self.open_path(&path);
+                }
+            }
+            Command::OpenRecent(n) => {
+                if let Some(path) = self.recent.paths().get(n).cloned()
+                    && self.may_discard()
+                {
+                    self.open_path(&path);
+                }
+            }
+            Command::ClearRecent => self.recent.clear(),
+            Command::Close | Command::Quit => {
+                if self.may_discard() {
+                    self.exit = true;
+                }
+            }
+            Command::Save => self.save(),
+            Command::SaveAs => self.save_as(),
+            Command::Revert => self.revert(),
+            Command::Undo
+            | Command::Redo
+            | Command::Cut
+            | Command::Copy
+            | Command::Paste
+            | Command::SelectAll => self.press(command),
+            Command::Find => self.open_prompt(Ask::Find),
+            Command::FindNext => self.find(true),
+            Command::FindPrevious => self.find(false),
+            Command::GoToLine => self.open_prompt(Ask::GoTo),
+            Command::ZoomIn => self.zoom(1),
+            Command::ZoomOut => self.zoom(-1),
+            Command::ActualSize => self.zoom(0),
+            Command::LineNumbers => {
+                let on = !self.editor_ref().gutter();
+                self.editor().set_gutter(on);
+            }
+            Command::Format => self.start_format(),
+            Command::ReadOnly => {
+                self.read_only = !self.read_only;
+                let read_only = self.read_only;
+                self.editor().set_read_only(read_only);
+                self.say(if read_only { "read only" } else { "editable" }.into());
+            }
+            Command::CopyPath => self.copy_path(),
+            Command::Reveal => {
+                let path = self.editor_ref().document().path().map(Path::to_path_buf);
+                if let Some(path) = path
+                    && let Err(e) = reveal(&path)
+                {
+                    self.say(format!("showing {}: {e}", path.display()));
+                }
+            }
+            Command::Help => self.open_url(&format!("{}#readme", menu::HOME)),
+            Command::ReportIssue => self.open_url(menu::ISSUES),
+            Command::About => {
+                MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title("About squint")
+                    .set_description(format!(
+                        "squint {}\n\n{}\n\n{}",
+                        env!("CARGO_PKG_VERSION"),
+                        env!("CARGO_PKG_DESCRIPTION"),
+                        menu::HOME
+                    ))
+                    .set_buttons(MessageButtons::Ok)
+                    .show();
+            }
+        }
+    }
+
+    /// Does an edit by pressing its keys, so it happens exactly as they make
+    /// it happen, to whatever has the keyboard.
+    fn press(&mut self, command: Command) {
+        let Some((code, modifiers)) = menu::edit_keys(command) else {
+            return;
+        };
+        let key = |state| InputEvent::Key {
+            code,
+            state,
+            repeat: false,
+            modifiers,
+        };
+        self.ui
+            .handle(&[key(ElementState::Down), key(ElementState::Up)]);
+    }
+
+    /// Acts on what the tree and the system's menus have said, until they
+    /// have nothing more to say: a command can make the tree say something,
+    /// as an edit pressed into the text area does. Whether anything was said.
+    fn drain(&mut self) -> bool {
+        let mut acted = false;
+        // A command answered by another is fine; one that never stops is a
+        // bug, and should not also hang the window.
+        for _ in 0..8 {
+            let messages: Vec<Msg> = self.ui.drain_messages().collect();
+            #[cfg(target_os = "macos")]
+            let chosen = self
+                .native
+                .as_ref()
+                .map(NativeMenu::chosen)
+                .unwrap_or_default();
+            #[cfg(not(target_os = "macos"))]
+            let chosen: Vec<Command> = Vec::new();
+            if messages.is_empty() && chosen.is_empty() {
+                break;
+            }
+            acted = true;
+            for msg in messages {
+                self.handle(msg);
+            }
+            for command in chosen {
+                self.run(command);
+            }
+        }
+        acted
+    }
+
+    // ---- files --------------------------------------------------------------
+
+    /// Whether the document may be put away: it has no unsaved changes, or
+    /// the user said to save them and they are saved, or to lose them.
+    fn may_discard(&mut self) -> bool {
+        let (modified, name) = {
+            let doc = self.editor_ref().document();
+            (
+                doc.is_modified(),
+                doc.path().map_or_else(|| "Untitled".to_string(), name_of),
+            )
+        };
+        if !modified {
+            return true;
+        }
+        let answer = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("squint")
+            .set_description(format!(
+                "Do you want to save the changes you made to {name}?\n\n\
+                 Your changes will be lost if you don't save them."
+            ))
+            .set_buttons(MessageButtons::YesNoCancelCustom(
+                "Save".into(),
+                "Don't Save".into(),
+                "Cancel".into(),
+            ))
+            .show();
+        match answer {
+            MessageDialogResult::Yes => {}
+            MessageDialogResult::Custom(button) if button == "Save" => {}
+            MessageDialogResult::No => return true,
+            MessageDialogResult::Custom(button) if button == "Don't Save" => return true,
+            _ => return false,
+        }
+        self.save();
+        !self.editor_ref().document().is_modified()
+    }
+
+    fn pick_open(&self) -> Option<PathBuf> {
+        let mut dialog = FileDialog::new().set_title("Open");
+        if let Some(dir) = self.editor_ref().document().path().and_then(Path::parent) {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_file()
+    }
+
+    /// Opens `path` in place of the document. Whether it opened.
+    fn open_path(&mut self, path: &Path) -> bool {
+        match FileDocument::open(path) {
+            Ok(doc) => {
+                self.load(doc);
+                self.recent.add(path);
+                self.say(String::new());
+                true
+            }
+            Err(e) => {
+                if !path.exists() {
+                    self.recent.remove(path);
+                }
+                self.say(format!("{}: {e}", path.display()));
+                false
+            }
+        }
+    }
+
+    /// Puts `doc` in the editor in place of what was there, and forgets what
+    /// was known about that.
+    fn load(&mut self, doc: FileDocument) {
+        let path = doc.path().map(Path::to_path_buf);
+        self.editor().set_document(doc);
+        self.search = None;
+        // The new document marks nothing yet; an open find field sets it
+        // again on the next frame.
+        self.highlighted.clear();
+        self.named(path.as_deref());
+    }
+
+    /// Takes on what the document's file decides: the title, the tab stops,
+    /// and whether it can be formatted.
+    fn named(&mut self, path: Option<&Path>) {
+        self.title = match path {
+            Some(p) => format!("{} — squint", name_of(p)),
+            None => "squint".into(),
+        };
+        let tab_width = path
+            .map(editorconfig::properties_for)
+            .and_then(|props| props.tab_width())
+            .unwrap_or(4);
+        self.editor().set_tab_width(tab_width);
+        let head = self.editor_ref().document().head(8192);
+        self.format_kind = format::detect(path, &head);
+    }
+
+    fn save(&mut self) {
+        if self.editor_ref().document().path().is_none() {
+            return self.save_as();
+        }
+        let result = self.editor().document_mut().save();
+        self.say(match result {
+            Ok(()) => "saved".into(),
+            Err(e) => e,
+        });
+    }
+
+    fn save_as(&mut self) {
+        let current = self.editor_ref().document().path().map(Path::to_path_buf);
+        let mut dialog = FileDialog::new().set_title("Save As");
+        match &current {
+            Some(path) => {
+                if let Some(dir) = path.parent() {
+                    dialog = dialog.set_directory(dir);
+                }
+                dialog = dialog.set_file_name(name_of(path));
+            }
+            None => dialog = dialog.set_file_name("Untitled.txt"),
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        let result = self.editor().document_mut().save_as(&path);
+        match result {
+            Ok(()) => {
+                self.recent.add(&path);
+                self.named(Some(&path));
+                self.say(format!("saved as {}", path.display()));
+            }
+            Err(e) => self.say(e),
+        }
+    }
+
+    /// Throws the changes away and opens the file again, at the same line.
+    fn revert(&mut self) {
+        let (path, modified) = {
+            let doc = self.editor_ref().document();
+            (doc.path().map(Path::to_path_buf), doc.is_modified())
+        };
+        let Some(path) = path.filter(|_| modified) else {
+            return;
+        };
+        let answer = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("squint")
+            .set_description(format!(
+                "Revert {} to the saved version?\n\nYour changes will be lost.",
+                name_of(&path)
+            ))
+            .set_buttons(MessageButtons::OkCancelCustom(
+                "Revert".into(),
+                "Cancel".into(),
+            ))
+            .show();
+        let revert = match answer {
+            MessageDialogResult::Ok => true,
+            MessageDialogResult::Custom(button) => button == "Revert",
+            _ => false,
+        };
+        if !revert {
+            return;
+        }
+        let line = self.editor().caret().line;
+        if self.open_path(&path) {
+            self.editor().go_to(line);
+            self.say("reverted".into());
+        }
+    }
+
+    fn copy_path(&mut self) {
+        let Some(path) = self.editor_ref().document().path().map(Path::to_path_buf) else {
+            return;
+        };
+        let text = path.display().to_string();
+        let copied = self.clipboard.as_mut().map(|c| c.set_text(text.clone()));
+        self.say(match copied {
+            Some(Ok(())) => format!("copied {text}"),
+            Some(Err(e)) => format!("clipboard: {e}"),
+            None => "there is no clipboard to copy to".into(),
+        });
+    }
+
+    fn open_url(&mut self, url: &str) {
+        if let Err(e) = open_url(url) {
+            self.say(format!("opening {url}: {e}"));
+        }
+    }
+
+    // ---- the view -----------------------------------------------------------
+
+    /// One size bigger for `1`, one smaller for `-1`, the usual for `0`.
+    fn zoom(&mut self, step: i32) {
+        let now = self.text_size;
+        let size = match step {
+            0 => Some(TEXT_SIZE),
+            s if s > 0 => TEXT_SIZES.iter().copied().find(|&t| t > now),
+            _ => TEXT_SIZES.iter().rev().copied().find(|&t| t < now),
+        }
+        .unwrap_or(now);
+        self.text_size = size;
+        let style = TextStyle {
+            size_px: (size as f32 * self.scale + 0.5) as u16,
+            ..self.mono
+        };
+        self.editor().set_style(style);
+        self.say(format!("text size {size}"));
     }
 
     // ---- the prompt -------------------------------------------------------
@@ -625,12 +1201,7 @@ impl App {
         }
         match FileDocument::open(&out) {
             Ok(doc) => {
-                self.editor().set_document(doc);
-                self.title = format!("{} — squint", name_of(&out));
-                self.search = None;
-                // The new document marks nothing yet; an open find field
-                // sets it again on the next frame.
-                self.highlighted.clear();
+                self.load(doc);
                 let kind = job.kind().name();
                 self.say(format!(
                     "formatted as {kind} with {note} into {}",
@@ -650,14 +1221,6 @@ impl App {
     }
 
     // ---- the rest -----------------------------------------------------------
-
-    fn save(&mut self) {
-        let result = self.editor().document_mut().save();
-        self.say(match result {
-            Ok(()) => "saved".into(),
-            Err(e) => e,
-        });
-    }
 
     fn refresh_status(&mut self) {
         let editor = self.editor();
@@ -723,6 +1286,8 @@ impl App {
                     self.editor().insert_text(&text);
                 }
             }
+            Msg::MenuTitle(index) => self.open_title(index),
+            Msg::Menu(event) => self.menu_event(event),
         }
     }
 
@@ -752,6 +1317,13 @@ const ALL_SIDES: Anchors = Anchors {
     top: true,
     right: true,
     bottom: true,
+};
+
+const TOP_ROW: Anchors = Anchors {
+    left: true,
+    top: true,
+    right: true,
+    bottom: false,
 };
 
 const BOTTOM_ROW: Anchors = Anchors {
@@ -807,20 +1379,53 @@ fn name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Starts `program` and lets it get on with it, waited for on a thread of its
+/// own so it does not linger as a zombie.
+fn launch<S: AsRef<OsStr>>(program: &str, args: impl IntoIterator<Item = S>) -> io::Result<()> {
+    let mut child = std::process::Command::new(program).args(args).spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
+/// Opens `url` in the user's browser.
+fn open_url(url: &str) -> io::Result<()> {
+    if cfg!(target_os = "macos") {
+        launch("open", [url])
+    } else if cfg!(windows) {
+        launch("explorer", [url])
+    } else {
+        launch("xdg-open", [url])
+    }
+}
+
+/// Shows `path` in the platform's file manager: selected, where it can be.
+fn reveal(path: &Path) -> io::Result<()> {
+    if cfg!(target_os = "macos") {
+        launch("open", [OsStr::new("-R"), path.as_os_str()])
+    } else if cfg!(windows) {
+        let mut select = OsString::from("/select,");
+        select.push(path);
+        launch("explorer", [select])
+    } else {
+        let dir = path.parent().unwrap_or(Path::new("/"));
+        launch("xdg-open", [dir.as_os_str()])
+    }
+}
+
 impl DeniseApp for App {
     fn update(&mut self, events: &[InputEvent], damage: &mut DamageTracker) {
         let mut forwarded: Vec<InputEvent> = Vec::with_capacity(events.len());
         for event in events {
+            // An open menu has the keyboard, Escape included.
+            let menu_up = self.ui.popup_open();
             match event {
-                InputEvent::CloseRequested => {
-                    self.exit = true;
-                    continue;
-                }
+                // Answered by `close_requested`, which could still say no.
+                InputEvent::CloseRequested => continue,
                 InputEvent::Key {
                     code: KeyCode::Escape,
                     state: ElementState::Down,
                     ..
-                } if self.prompt.is_some() => {
+                } if self.prompt.is_some() && !menu_up => {
                     self.close_prompt();
                     continue;
                 }
@@ -834,13 +1439,14 @@ impl DeniseApp for App {
                     self.find(false);
                     continue;
                 }
+                // F10 goes to the menu bar, as it does on Windows and on most
+                // Linux desktops.
                 InputEvent::Key {
-                    code: KeyCode::F3,
+                    code: KeyCode::F10,
                     state: ElementState::Down,
-                    modifiers,
                     ..
-                } => {
-                    self.find(!modifiers.contains(Modifiers::SHIFT));
+                } if self.bar.is_some() && !menu_up => {
+                    self.open_title(0);
                     continue;
                 }
                 InputEvent::Key {
@@ -848,35 +1454,10 @@ impl DeniseApp for App {
                     state: ElementState::Down,
                     modifiers,
                     ..
-                } if modifiers.contains(Modifiers::SUPER)
-                    || modifiers.contains(Modifiers::CTRL) =>
-                {
-                    match code {
-                        KeyCode::S => {
-                            self.save();
-                            continue;
-                        }
-                        KeyCode::F if modifiers.contains(Modifiers::SHIFT) => {
-                            self.start_format();
-                            continue;
-                        }
-                        KeyCode::F => {
-                            self.open_prompt(Ask::Find);
-                            continue;
-                        }
-                        KeyCode::G => {
-                            self.find(!modifiers.contains(Modifiers::SHIFT));
-                            continue;
-                        }
-                        KeyCode::L => {
-                            self.open_prompt(Ask::GoTo);
-                            continue;
-                        }
-                        KeyCode::Q => {
-                            self.exit = true;
-                            continue;
-                        }
-                        _ => {}
+                } if !menu_up => {
+                    if let Some(command) = menu::shortcut(*code, *modifiers) {
+                        self.run(command);
+                        continue;
                     }
                 }
                 _ => {}
@@ -885,16 +1466,16 @@ impl DeniseApp for App {
         }
         self.ui.handle(&forwarded);
         self.ui.tick(self.started.elapsed().as_millis() as u64);
-        let messages: Vec<Msg> = self.ui.drain_messages().collect();
-        for msg in messages {
-            self.handle(msg);
-        }
+        self.settle_menu();
+        let acted = self.drain();
         self.sync_highlight();
         self.pump_index();
         self.pump_find();
         self.pump_format();
         self.pump_syntax();
-        if !forwarded.is_empty() {
+        #[cfg(target_os = "macos")]
+        self.sync_menus();
+        if !forwarded.is_empty() || acted {
             self.refresh_status();
         }
         if self.ui.needs_paint() {
@@ -922,6 +1503,12 @@ impl DeniseApp for App {
 
     fn exit_requested(&self) -> bool {
         self.exit
+    }
+
+    /// The close button asks about unsaved changes first, and a Cancel keeps
+    /// the window.
+    fn close_requested(&mut self) -> bool {
+        self.may_discard()
     }
 
     fn title(&self) -> Option<&str> {

@@ -55,16 +55,27 @@ index instead of the lines, and show the file before it has been counted.
   the engine's document through the toolkit's `TextDocument` trait, so the
   widget never learns how big the file is. The line index is built in slices
   between frames while the status line counts up. Copy, cut and paste go
-  through the system clipboard.
+  through the system clipboard. The menus — File, Edit, View, Tools, Help,
+  and the application and Window menus on macOS — are the system's menu bar
+  on macOS and DeniseUI's `MenuBar` along the top of the window everywhere
+  else (`SQUINT_MENU=window` puts them in the window on macOS too). Both are
+  built from one list in [`desktop/src/menu.rs`](desktop/src/menu.rs), so they
+  offer the same commands with the same keys. Opening, saving and the
+  unsaved-changes question use the platform's own dialogs, and Open Recent is
+  kept in the user's configuration directory.
 
 | Keys (⌘ on macOS, Ctrl elsewhere) | |
 |---|---|
-| ⌘S | Save |
+| ⌘N / ⌘O | New file / open a file |
+| ⌘S / ⇧⌘S | Save / save as |
+| ⌘W, ⌘Q | Close the window / quit, asking first about unsaved changes |
 | ⌘F | Find. Enter for the next match, Shift+Enter for the previous, Esc to close |
 | ⌘G / ⇧⌘G, F3 / ⇧F3 | Next / previous match of the last search, with the field closed |
 | ⌘L | Go to line |
 | ⇧⌘F | Format JSON or XML into a new file, and open it |
-| ⌘Z / ⇧⌘Z | Undo / redo |
+| ⌘Z / ⇧⌘Z | Undo / redo; Ctrl+Y redoes too, off macOS |
+| ⌘= / ⌘- / ⌘0 | Bigger / smaller / the usual text size |
+| F10 | Into the menu bar in the window, off macOS |
 
 Find walks the file in slices between frames, like the index, so a search
 through gigabytes keeps the window drawing and shows how far it has got. A
@@ -76,16 +87,17 @@ rules; the one a search landed on is selected over the marks.
 cargo run --release -- /var/log/system.log
 cargo run --release -- --time /var/log/system.log        # no window: how long the parts take
 cargo run --release -- --snapshot out.ppm 2 some.log 1 error   # no window: one frame at 2x, at the first "error"
+cargo run --release -- --snapshot menu.ppm 2 some.log --menu File   # no window: with the File menu open in the window
 cargo run --release -- --format dump.json pretty.json          # no window: pretty-print to a file, or to stdout
 ```
 
 ## Roadmap
 
-1. An open dialog.
-2. IME composition forwarded from winit into the text area.
-3. Highlighting for logs, which syntect has no grammar for: ctail's line-local
+1. IME composition forwarded from winit into the text area.
+2. Highlighting for logs, which syntect has no grammar for: ctail's line-local
    rules, through the same `spans` hook.
-4. Conflict detection when the file changes underneath.
+3. Conflict detection when the file changes underneath.
+4. More than one window: New and Open replace the file in this one.
 5. Long lines: a single-line multi-gigabyte JSON still has to be formatted
    before it can be paged through; chunked lines would let it be read as is.
 

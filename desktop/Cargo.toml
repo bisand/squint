@@ -19,3 +19,15 @@ denise-text = { git = "https://github.com/bisand/denise", rev = "8aa9ef8d68d0459
 denise-ui = { git = "https://github.com/bisand/denise", rev = "8aa9ef8d68d0459fef57cf781d5ee81c9b464852", features = ["std", "truetype"] }
 denise-winit = { git = "https://github.com/bisand/denise", rev = "8aa9ef8d68d0459fef57cf781d5ee81c9b464852", features = ["gpu"] }
 arboard = { version = "3", default-features = false }
+# The platform's open, save and question dialogs.
+rfd = "0.15"
+# Where the list of recent files is kept.
+dirs = "6"
+
+# The menu bar is the system's on macOS; everywhere else it is DeniseUI's, in
+# the window.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.19", default-features = false }
+# To wake the window's loop when a menu row is chosen: see `native_menu::wake`.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
