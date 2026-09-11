@@ -6,8 +6,9 @@
 //! the document came from so it can go back there.
 
 use denise_ui::widgets::{Pos, TextDocument};
-use squint_core::{Document, Find, FindStep};
+use squint_core::{Document, Find, FindStep, Needle};
 use std::borrow::Cow;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 pub struct FileDocument {
@@ -15,6 +16,8 @@ pub struct FileDocument {
     path: Option<PathBuf>,
     /// The last thing that went wrong, until it is read.
     error: Option<String>,
+    /// What to mark on the lines on screen: the query being found.
+    highlight: Option<Needle>,
 }
 
 impl FileDocument {
@@ -23,6 +26,7 @@ impl FileDocument {
             doc: Document::open(path)?,
             path: Some(path.to_path_buf()),
             error: None,
+            highlight: None,
         })
     }
 
@@ -31,6 +35,7 @@ impl FileDocument {
             doc: Document::from_text(""),
             path: None,
             error: None,
+            highlight: None,
         }
     }
 
@@ -121,6 +126,12 @@ impl FileDocument {
             }
         }
     }
+
+    /// Marks every match of `query` on the lines drawn, by the same rules a
+    /// find uses; an empty query marks nothing.
+    pub fn set_highlight(&mut self, query: &str) {
+        self.highlight = (!query.is_empty()).then(|| Needle::new(query));
+    }
 }
 
 impl TextDocument for FileDocument {
@@ -167,5 +178,11 @@ impl TextDocument for FileDocument {
 
     fn redo(&mut self) -> bool {
         self.doc.redo()
+    }
+
+    fn highlights(&mut self, _n: usize, line: &str, out: &mut Vec<Range<usize>>) {
+        if let Some(needle) = &self.highlight {
+            needle.matches_in(line.as_bytes(), out);
+        }
     }
 }

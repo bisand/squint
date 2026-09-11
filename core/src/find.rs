@@ -13,6 +13,7 @@
 use crate::document::Document;
 use memchr::memmem;
 use std::io;
+use std::ops::Range;
 
 /// The most bytes one window covers, whatever the budget.
 const WINDOW: u64 = 1024 * 1024;
@@ -29,13 +30,72 @@ pub enum FindStep {
     NotFound,
 }
 
+/// A query, as it is matched.
+///
+/// Shared by [`Find`], which walks a document with it, and by anything that
+/// marks matches in text already read — the lines on screen — so the two can
+/// never disagree about what counts as one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Needle {
+    /// The query's bytes, lower-cased when it ignores case.
+    bytes: Vec<u8>,
+    case_sensitive: bool,
+}
+
+impl Needle {
+    /// `query` as matched: exactly if it has an upper-case letter, else
+    /// ignoring ASCII case.
+    pub fn new(query: &str) -> Self {
+        let case_sensitive = query.chars().any(char::is_uppercase);
+        let bytes = if case_sensitive {
+            query.as_bytes().to_vec()
+        } else {
+            query.to_ascii_lowercase().into_bytes()
+        };
+        Self {
+            bytes,
+            case_sensitive,
+        }
+    }
+
+    /// Its length in bytes, which is also the length of every match.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Whether case must match exactly: the query has an upper-case letter.
+    pub fn is_case_sensitive(&self) -> bool {
+        self.case_sensitive
+    }
+
+    /// Appends every match in `hay` to `out`, as byte ranges, in order and
+    /// without overlaps.
+    pub fn matches_in(&self, hay: &[u8], out: &mut Vec<Range<usize>>) {
+        let n = self.bytes.len();
+        if n == 0 || hay.len() < n {
+            return;
+        }
+        let lowered;
+        let hay = if self.case_sensitive {
+            hay
+        } else {
+            lowered = hay.to_ascii_lowercase();
+            &lowered
+        };
+        out.extend(memmem::find_iter(hay, &self.bytes).map(|i| i..i + n));
+    }
+}
+
 /// A search in progress.
 ///
 /// Built for the document as it is: an edit moves the offsets it has
 /// covered, so a front end starts a new one after changing the text.
 pub struct Find {
-    needle: Vec<u8>,
-    case_sensitive: bool,
+    needle: Needle,
     forward: bool,
     /// Ranges of match *starts* to examine, in order: from the origin to the
     /// end and then the part before it (backwards, the other way round).
@@ -52,12 +112,7 @@ impl Find {
     /// A search for `query`: forwards for the first match starting at or
     /// after `from`, or backwards for the last one starting before it.
     pub fn new(doc: &Document, query: &str, from: u64, forward: bool) -> Self {
-        let case_sensitive = query.chars().any(char::is_uppercase);
-        let needle = if case_sensitive {
-            query.as_bytes().to_vec()
-        } else {
-            query.to_ascii_lowercase().into_bytes()
-        };
+        let needle = Needle::new(query);
         let len = doc.len();
         let from = from.min(len);
         let segments = if forward {
@@ -68,7 +123,6 @@ impl Find {
         let cursor = if forward { segments[0].0 } else { segments[0].1 };
         Self {
             needle,
-            case_sensitive,
             forward,
             segments,
             seg: 0,
@@ -80,7 +134,7 @@ impl Find {
 
     /// Whether the query matches case exactly: it has an upper-case letter.
     pub fn is_case_sensitive(&self) -> bool {
-        self.case_sensitive
+        self.needle.is_case_sensitive()
     }
 
     /// Bytes examined so far, out of the document's length.
@@ -127,13 +181,13 @@ impl Find {
             buf.resize((end - a) as usize, 0);
             let got = doc.read_at(a, &mut buf)?;
             buf.truncate(got);
-            if !self.case_sensitive {
+            if !self.needle.case_sensitive {
                 buf.make_ascii_lowercase();
             }
             let hit = if self.forward {
-                memmem::find(&buf, &self.needle)
+                memmem::find(&buf, &self.needle.bytes)
             } else {
-                memmem::rfind(&buf, &self.needle)
+                memmem::rfind(&buf, &self.needle.bytes)
             };
             if let Some(i) = hit {
                 return Ok(FindStep::Found {
@@ -218,6 +272,23 @@ mod tests {
         assert!(Find::new(&d, "Hello", 0, true).is_case_sensitive());
         assert_eq!(run(&d, "Hello", 1, true, 100), found(0, true));
         assert_eq!(run(&d, "HELLO", 7, true, 100), found(6, true));
+    }
+
+    #[test]
+    fn a_needle_marks_every_match_in_a_line_once() {
+        let mut out = Vec::new();
+        Needle::new("aa").matches_in(b"aaaaa", &mut out);
+        assert_eq!(out, vec![0..2, 2..4], "matches do not overlap");
+        out.clear();
+        Needle::new("error").matches_in(b"ERROR: an Error, error", &mut out);
+        assert_eq!(out, vec![0..5, 10..15, 17..22]);
+        out.clear();
+        Needle::new("Error").matches_in(b"ERROR: an Error, error", &mut out);
+        assert_eq!(out, vec![10..15], "a capital asks for exact case");
+        out.clear();
+        Needle::new("").matches_in(b"anything", &mut out);
+        Needle::new("longer than this").matches_in(b"short", &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]

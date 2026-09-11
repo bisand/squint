@@ -378,7 +378,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 [[package]]
 name = "denise"
 version = "0.21.1"
-source = "git+https://github.com/bisand/denise?rev=dd8dc5111d54294ae70de0f71dddec1f7b47ab58#dd8dc5111d54294ae70de0f71dddec1f7b47ab58"
+source = "git+https://github.com/bisand/denise?rev=4daee7a11b224d9e5ae0894e043290e9ef475644#4daee7a11b224d9e5ae0894e043290e9ef475644"
 dependencies = [
  "thiserror 2.0.20",
 ]
@@ -386,7 +386,7 @@ dependencies = [
 [[package]]
 name = "denise-macos"
 version = "0.21.1"
-source = "git+https://github.com/bisand/denise?rev=dd8dc5111d54294ae70de0f71dddec1f7b47ab58#dd8dc5111d54294ae70de0f71dddec1f7b47ab58"
+source = "git+https://github.com/bisand/denise?rev=4daee7a11b224d9e5ae0894e043290e9ef475644#4daee7a11b224d9e5ae0894e043290e9ef475644"
 dependencies = [
  "denise",
  "objc2 0.6.4",
@@ -402,7 +402,7 @@ dependencies = [
 [[package]]
 name = "denise-render"
 version = "0.21.1"
-source = "git+https://github.com/bisand/denise?rev=dd8dc5111d54294ae70de0f71dddec1f7b47ab58#dd8dc5111d54294ae70de0f71dddec1f7b47ab58"
+source = "git+https://github.com/bisand/denise?rev=4daee7a11b224d9e5ae0894e043290e9ef475644#4daee7a11b224d9e5ae0894e043290e9ef475644"
 dependencies = [
  "denise",
 ]
@@ -410,7 +410,7 @@ dependencies = [
 [[package]]
 name = "denise-text"
 version = "0.21.1"
-source = "git+https://github.com/bisand/denise?rev=dd8dc5111d54294ae70de0f71dddec1f7b47ab58#dd8dc5111d54294ae70de0f71dddec1f7b47ab58"
+source = "git+https://github.com/bisand/denise?rev=4daee7a11b224d9e5ae0894e043290e9ef475644#4daee7a11b224d9e5ae0894e043290e9ef475644"
 dependencies = [
  "denise",
  "denise-render",
@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "denise-ui"
 version = "0.21.1"
-source = "git+https://github.com/bisand/denise?rev=dd8dc5111d54294ae70de0f71dddec1f7b47ab58#dd8dc5111d54294ae70de0f71dddec1f7b47ab58"
+source = "git+https://github.com/bisand/denise?rev=4daee7a11b224d9e5ae0894e043290e9ef475644#4daee7a11b224d9e5ae0894e043290e9ef475644"
 dependencies = [
  "denise",
  "denise-render",
@@ -431,7 +431,7 @@ dependencies = [
 [[package]]
 name = "denise-wgpu"
 version = "0.21.1"
-source = "git+https://github.com/bisand/denise?rev=dd8dc5111d54294ae70de0f71dddec1f7b47ab58#dd8dc5111d54294ae70de0f71dddec1f7b47ab58"
+source = "git+https://github.com/bisand/denise?rev=4daee7a11b224d9e5ae0894e043290e9ef475644#4daee7a11b224d9e5ae0894e043290e9ef475644"
 dependencies = [
  "bytemuck",
  "denise",
@@ -443,7 +443,7 @@ dependencies = [
 [[package]]
 name = "denise-winit"
 version = "0.21.1"
-source = "git+https://github.com/bisand/denise?rev=dd8dc5111d54294ae70de0f71dddec1f7b47ab58#dd8dc5111d54294ae70de0f71dddec1f7b47ab58"
+source = "git+https://github.com/bisand/denise?rev=4daee7a11b224d9e5ae0894e043290e9ef475644#4daee7a11b224d9e5ae0894e043290e9ef475644"
 dependencies = [
  "denise",
  "denise-macos",

@@ -54,7 +54,9 @@ index instead of the lines, and show the file before it has been counted.
 
 Find walks the file in slices between frames, like the index, so a search
 through gigabytes keeps the window drawing and shows how far it has got. A
-query with no capital letters ignores ASCII case.
+query with no capital letters ignores ASCII case. While the find field is
+open, every match on the lines on screen is marked as you type, by the same
+rules; the one a search landed on is selected over the marks.
 
 ```bash
 cargo run --release -- /var/log/system.log
@@ -64,8 +66,7 @@ cargo run --release -- --snapshot out.ppm 2 some.log 1 error   # no window: one 
 
 ## Roadmap
 
-1. An open dialog, and every match on screen highlighted rather than only the
-   selected one.
+1. An open dialog.
 2. IME composition forwarded from winit into the text area.
 3. Streaming pretty-printers for JSON and XML.
 4. Highlighting: line-local rules first, then `syntect` with state snapshots,

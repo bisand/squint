@@ -69,6 +69,9 @@ pub struct App {
     /// The last thing searched for, so ⌘G and F3 have something to find with
     /// the field closed, and the field opens holding it.
     last_query: String,
+    /// The query the editor is marking on screen, so it is only reached —
+    /// and so repainted — when that changes.
+    highlighted: String,
     scale: f32,
     title: String,
     /// What the status line says on the right: the last thing that happened.
@@ -151,6 +154,7 @@ impl App {
             prompt: None,
             search: None,
             last_query: String::new(),
+            highlighted: String::new(),
             scale,
             title,
             notice,
@@ -191,6 +195,7 @@ impl App {
         {
             input.set_text(query);
         }
+        self.sync_highlight();
         self.find(true);
         while self.search.is_some() {
             self.pump_find();
@@ -501,6 +506,19 @@ impl App {
         }
     }
 
+    /// Marks every match of what is typed in the find field on the lines on
+    /// screen, as it is typed, and nothing once the field closes.
+    fn sync_highlight(&mut self) {
+        let query = match self.prompt.as_ref().map(|p| p.ask) {
+            Some(Ask::Find) => self.prompt_text(),
+            _ => String::new(),
+        };
+        if query != self.highlighted {
+            self.editor().document_mut().set_highlight(&query);
+            self.highlighted = query;
+        }
+    }
+
     /// Whether the find field has the keyboard.
     fn typing_a_find(&self) -> bool {
         self.prompt
@@ -611,6 +629,7 @@ impl DeniseApp for App {
         for msg in messages {
             self.handle(msg);
         }
+        self.sync_highlight();
         self.pump_index();
         self.pump_find();
         if !forwarded.is_empty() {

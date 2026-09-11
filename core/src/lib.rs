@@ -13,6 +13,6 @@ pub mod index;
 pub mod source;
 
 pub use document::Document;
-pub use find::{Find, FindStep};
+pub use find::{Find, FindStep, Needle};
 pub use index::LineIndex;
 pub use source::{FileSource, MemSource, Source};
