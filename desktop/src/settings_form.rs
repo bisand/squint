@@ -1,25 +1,29 @@
-//! The settings dialog: a modal over the window, a section down the left and
-//! the rows of that section to the right, with Save, Apply and Cancel along
-//! the bottom.
+//! What the settings window holds: a section down the left, the rows of that
+//! section to the right, and Save, Apply and Cancel along the bottom.
 //!
-//! The dialog edits a copy — the draft — and never the settings the window is
-//! running on. Save and Apply hand the draft back to [`App`](crate::app::App),
-//! which writes it to `settings.json` and applies it; Cancel drops it. The
-//! file is the settings' real home, and Edit the File… opens it in a tab, so
-//! this is an editor for a file that can be edited any other way too.
+//! The form fills a window of its own — see
+//! [`settings_window`](crate::settings_window) — rather than covering the text,
+//! which is where every desktop keeps its settings. It knows nothing about the
+//! window it is in beyond the tree it builds into.
+//!
+//! It edits a copy — the draft — and never the settings the editor is running
+//! on. Save and Apply hand the draft back through [`Outcome`], and the window
+//! passes it to the editor, which writes it to `settings.json` and applies it;
+//! Cancel drops it. The file is the settings' real home, and Edit the File…
+//! opens it in a tab, so this is an editor for a file that can be edited any
+//! other way too.
 //!
 //! Controls are read from the tree rather than reported by messages: a
 //! checkbox's message is a fn pointer and cannot say which checkbox it is, so
 //! every control this built is kept in [`Form::controls`] and read back
 //! whenever anything happens. What is on screen is the draft, always.
 
-use crate::app::Msg;
 use crate::fonts;
 use crate::settings::{
     Appearance, BUILT_IN_THEMES, CustomTheme, Editor, Formatting, General, Highlighting,
     IndentStyle, NewlineStyle, OpenIn, Settings,
 };
-use denise::{Color, Radius, Rect, Role, Size, Theme};
+use denise::{Color, Rect, Role, Size};
 use denise_text::TextStyle;
 use denise_ui::widgets::{Button, Checkbox, Label, List, Panel, Select, TextInput, open_select};
 use denise_ui::{NodeId, Ui};
@@ -133,15 +137,13 @@ struct Control {
 }
 
 pub struct Form {
-    /// The settings as the dialog has them, which the window only sees on
-    /// Save or Apply.
+    /// The settings as the form has them, which the editor only sees on Save
+    /// or Apply.
     draft: Settings,
-    /// What to go back to when Cancel undoes a preview.
-    theme_before: Theme,
     section: usize,
-    /// The modal scene, dropped whole when the dialog closes.
-    scene: NodeId,
-    card: NodeId,
+    /// Everything the form has built, under the window's root, so a resize
+    /// can drop the lot and lay it out again.
+    frame: NodeId,
     /// The scrolling page the rows are in.
     page: NodeId,
     sections: NodeId,
@@ -155,7 +157,7 @@ pub struct Form {
     /// The size the dialog was laid out for; a different one is rebuilt.
     size: Size,
     file: Option<PathBuf>,
-    /// The face the chrome is drawn in, which the dialog is drawn in too.
+    /// The face the chrome is drawn in, which the form is drawn in too.
     chrome: TextStyle,
     /// The themes syntect has, read the first time they are shown: loading
     /// the grammars to list them would hold up the dialog opening.
@@ -164,36 +166,34 @@ pub struct Form {
 
 /// The message a checkbox sends. A fn pointer cannot say which checkbox it
 /// is; the tree is read instead.
-fn ticked(on: bool) -> Msg {
-    Msg::Form(FormMsg::Ticked(on))
+fn ticked(on: bool) -> FormMsg {
+    FormMsg::Ticked(on)
 }
 
-fn section_picked(index: usize) -> Msg {
-    Msg::Form(FormMsg::Section(index))
+fn section_picked(index: usize) -> FormMsg {
+    FormMsg::Section(index)
 }
 
-fn chose(row: usize) -> Msg {
-    Msg::Form(FormMsg::Chose(row))
+fn chose(row: usize) -> FormMsg {
+    FormMsg::Chose(row)
 }
 
 impl Form {
-    /// Opens the dialog over the window, editing a copy of `settings`.
-    pub fn open(
-        ui: &mut Ui<Msg>,
+    /// Builds the form into `ui`, filling it, editing a copy of `settings`.
+    pub fn build_in(
+        ui: &mut Ui<FormMsg>,
         settings: &Settings,
         file: Option<PathBuf>,
         scale: f32,
         chrome: TextStyle,
     ) -> Option<Self> {
-        let scene = ui.push_scene(150);
+        let root = ui.root();
         let mut form = Self {
             draft: settings.clone(),
-            theme_before: *ui.theme(),
             section: 0,
-            scene,
-            card: scene,
-            page: scene,
-            sections: scene,
+            frame: root,
+            page: root,
+            sections: root,
             controls: Vec::new(),
             open: None,
             y: 0,
@@ -208,14 +208,6 @@ impl Form {
         Some(form)
     }
 
-    /// Takes the dialog away, putting back the theme a preview changed.
-    pub fn close(self, ui: &mut Ui<Msg>, keep_theme: bool) {
-        ui.pop_scene();
-        if !keep_theme {
-            ui.set_theme(self.theme_before);
-        }
-    }
-
     pub fn draft(&self) -> &Settings {
         &self.draft
     }
@@ -227,7 +219,7 @@ impl Form {
     }
 
     /// Shows the section of that name, for a snapshot. Whether there is one.
-    pub fn show_section(&mut self, name: &str, ui: &mut Ui<Msg>) -> bool {
+    pub fn show_section(&mut self, name: &str, ui: &mut Ui<FormMsg>) -> bool {
         let Some(index) = SECTIONS.iter().position(|s| s.eq_ignore_ascii_case(name)) else {
             return false;
         };
@@ -236,7 +228,7 @@ impl Form {
     }
 
     /// Sets the font a file dialog picked, and shows it.
-    pub fn set_font(&mut self, ui: &mut Ui<Msg>, text: bool, name: String) {
+    pub fn set_font(&mut self, ui: &mut Ui<FormMsg>, text: bool, name: String) {
         if text {
             self.draft.appearance.text_font = Some(name);
         } else {
@@ -245,15 +237,15 @@ impl Form {
         self.rebuild(ui);
     }
 
-    /// Lays the dialog out again when the window has been resized.
-    pub fn resized(&mut self, ui: &mut Ui<Msg>) {
+    /// Lays the form out again when its window has been resized.
+    pub fn resized(&mut self, ui: &mut Ui<FormMsg>) {
         if ui.size() == self.size {
             return;
         }
         self.read(ui);
         self.size = ui.size();
-        let card = self.card;
-        ui.remove(card);
+        let frame = self.frame;
+        ui.remove(frame);
         let _ = self.build(ui);
     }
 
@@ -261,7 +253,7 @@ impl Form {
 
     /// Acts on something the dialog said. What the window should do about it,
     /// if anything.
-    pub fn handle(&mut self, msg: FormMsg, ui: &mut Ui<Msg>) -> Option<Outcome> {
+    pub fn handle(&mut self, msg: FormMsg, ui: &mut Ui<FormMsg>) -> Option<Outcome> {
         match msg {
             FormMsg::Section(index) => {
                 self.read(ui);
@@ -305,7 +297,7 @@ impl Form {
                 ui.close_popup();
                 let index = self.open.take()?;
                 if let Some(control) = self.controls.get(index)
-                    && let Some(select) = ui.widget_mut::<Select<Msg>>(control.node)
+                    && let Some(select) = ui.widget_mut::<Select<FormMsg>>(control.node)
                 {
                     select.set_selected(Some(row));
                 }
@@ -321,7 +313,7 @@ impl Form {
         }
     }
 
-    fn button(&mut self, action: Action, ui: &mut Ui<Msg>) -> Option<Outcome> {
+    fn button(&mut self, action: Action, ui: &mut Ui<FormMsg>) -> Option<Outcome> {
         self.read(ui);
         match action {
             Action::Save => Some(Outcome::Save),
@@ -403,7 +395,7 @@ impl Form {
     }
 
     /// The theme as the draft has it, so an edit is seen while it is made.
-    fn preview(&mut self, ui: &mut Ui<Msg>) {
+    fn preview(&mut self, ui: &mut Ui<FormMsg>) {
         let theme = self.draft.theme().scaled(self.scale);
         if *ui.theme() != theme {
             ui.set_theme(theme);
@@ -434,13 +426,13 @@ impl Form {
     // ---- reading the controls ----------------------------------------------
 
     /// Takes what every control on the page says into the draft.
-    fn read(&mut self, ui: &Ui<Msg>) {
+    fn read(&mut self, ui: &Ui<FormMsg>) {
         let mut draft = std::mem::take(&mut self.draft);
         for control in &self.controls {
             match &control.kind {
                 Kind::Check => {
                     let Some(on) = ui
-                        .widget::<Checkbox<Msg>>(control.node)
+                        .widget::<Checkbox<FormMsg>>(control.node)
                         .map(Checkbox::checked)
                     else {
                         continue;
@@ -449,7 +441,7 @@ impl Form {
                 }
                 Kind::Select(options) => {
                     let Some(chosen) = ui
-                        .widget::<Select<Msg>>(control.node)
+                        .widget::<Select<FormMsg>>(control.node)
                         .and_then(Select::selected)
                         .and_then(|i| options.get(i))
                     else {
@@ -459,7 +451,7 @@ impl Form {
                 }
                 Kind::Text => {
                     let Some(text) = ui
-                        .widget::<TextInput<Msg>>(control.node)
+                        .widget::<TextInput<FormMsg>>(control.node)
                         .map(|field| field.text().to_string())
                     else {
                         continue;
@@ -474,38 +466,36 @@ impl Form {
     // ---- building it -------------------------------------------------------
 
     /// The card, the list of sections, the buttons and the first page.
-    fn build(&mut self, ui: &mut Ui<Msg>) -> Option<()> {
+    fn build(&mut self, ui: &mut Ui<FormMsg>) -> Option<()> {
         let s = |v: i32| (v as f32 * self.scale + 0.5) as i32;
         let px = |v: f32| (v * self.scale + 0.5) as u16;
         let size = ui.size();
         self.size = size;
         let (w, h) = (size.width as i32, size.height as i32);
-        let card_w = s(820).min(w - s(40)).max(s(320));
-        let card_h = s(560).min(h - s(40)).max(s(240));
-        let card = ui.add(
-            self.scene,
-            Panel::default().with_radius(Radius::Box).backdrop(),
-            Rect::new((w - card_w) / 2, (h - card_h) / 2, card_w, card_h),
-        )?;
-        self.card = card;
-        let pad = s(16);
-        let title = Label::new("Settings").with_size(px(17.0));
-        ui.add(card, title, Rect::new(pad, pad, card_w - pad * 2, s(22)))?;
+        // Everything hangs off one node, so a resize drops the lot and this
+        // runs again. The window's own ground is what shows behind it.
+        let root = ui.root();
+        let frame = ui.add(root, Panel::bare(), Rect::new(0, 0, w, h))?;
+        self.frame = frame;
+
+        let pad = s(14);
+        // No heading: the window's title bar already says what this is. What
+        // it does not say is where the settings are kept.
         let where_it_lives = match &self.file {
             Some(file) => format!("kept in {}", file.display()),
             None => "not written anywhere: this squint keeps nothing".to_string(),
         };
         ui.add(
-            card,
+            frame,
             Label::new(where_it_lives)
                 .with_size(px(10.0))
                 .with_role(Role::Neutral),
-            Rect::new(pad, pad + s(22), card_w - pad * 2, s(14)),
+            Rect::new(pad, pad, w - pad * 2, s(14)),
         )?;
 
-        let top = pad + s(44);
+        let top = pad + s(22);
         let buttons_h = s(44);
-        let body_h = card_h - top - buttons_h - pad;
+        let body_h = h - top - buttons_h - pad;
         let list_w = s(150);
         let list = List::new(SECTIONS, section_picked)
             .with_selected(Some(self.section))
@@ -515,21 +505,21 @@ impl Form {
                 ..self.chrome
             })
             .with_role(Role::Primary);
-        self.sections = ui.add(card, list, Rect::new(pad, top, list_w, body_h))?;
+        self.sections = ui.add(frame, list, Rect::new(pad, top, list_w, body_h))?;
 
-        let page_x = pad + list_w + s(12);
-        self.page_w = card_w - page_x - pad;
+        let page_x = pad + list_w + s(14);
+        self.page_w = w - page_x - pad;
         let page = ui.add(
-            card,
+            frame,
             Panel::bare(),
             Rect::new(page_x, top, self.page_w, body_h),
         )?;
         ui.set_scrollable(page, true);
         self.page = page;
 
-        // The buttons: what closes the dialog on the right, where a dialog's
+        // The buttons: what closes the window on the right, where a dialog's
         // buttons are, and what does not on the left.
-        let by = card_h - buttons_h + s(4);
+        let by = h - buttons_h + s(4);
         let bw = s(88);
         let bh = s(28);
         let small = TextStyle {
@@ -541,22 +531,22 @@ impl Form {
             ("Restore Defaults", Action::Restore, s(128)),
             ("Edit the File…", Action::EditFile, s(110)),
         ] {
-            let button = Button::new(label, Msg::Form(FormMsg::Button(action)))
+            let button = Button::new(label, FormMsg::Button(action))
                 .with_style(small)
                 .with_role(Role::Neutral);
-            ui.add(card, button, Rect::new(left, by, width, bh))?;
+            ui.add(frame, button, Rect::new(left, by, width, bh))?;
             left += width + s(8);
         }
-        let mut right = card_w - pad - bw;
+        let mut right = w - pad - bw;
         for (label, action, role) in [
             ("Save", Action::Save, Role::Primary),
             ("Apply", Action::Apply, Role::Neutral),
             ("Cancel", Action::Cancel, Role::Neutral),
         ] {
-            let button = Button::new(label, Msg::Form(FormMsg::Button(action)))
+            let button = Button::new(label, FormMsg::Button(action))
                 .with_style(small)
                 .with_role(role);
-            ui.add(card, button, Rect::new(right, by, bw, bh))?;
+            ui.add(frame, button, Rect::new(right, by, bw, bh))?;
             right -= bw + s(8);
         }
 
@@ -567,7 +557,7 @@ impl Form {
 
     /// Builds the page again: the rows of the section, as the draft is now.
     /// Whatever had the keyboard has it again, if its row is still there.
-    fn rebuild(&mut self, ui: &mut Ui<Msg>) {
+    fn rebuild(&mut self, ui: &mut Ui<FormMsg>) {
         let Some(bounds) = ui.layout(self.page) else {
             return;
         };
@@ -578,12 +568,12 @@ impl Form {
             .map(|c| c.field);
         ui.remove(self.page);
         self.controls.clear();
-        let Some(page) = ui.add(self.card, Panel::bare(), bounds) else {
+        let Some(page) = ui.add(self.frame, Panel::bare(), bounds) else {
             return;
         };
         ui.set_scrollable(page, true);
         self.page = page;
-        if let Some(list) = ui.widget_mut::<List<Msg>>(self.sections) {
+        if let Some(list) = ui.widget_mut::<List<FormMsg>>(self.sections) {
             list.set_selected(Some(self.section));
         }
         self.fill_page(ui);
@@ -595,7 +585,7 @@ impl Form {
         }
     }
 
-    fn fill_page(&mut self, ui: &mut Ui<Msg>) {
+    fn fill_page(&mut self, ui: &mut Ui<FormMsg>) {
         self.y = 0;
         match self.section {
             0 => self.general_page(ui),
@@ -606,7 +596,7 @@ impl Form {
         }
     }
 
-    fn general_page(&mut self, ui: &mut Ui<Msg>) {
+    fn general_page(&mut self, ui: &mut Ui<FormMsg>) {
         let General {
             reopen_tabs,
             reopen_at_line,
@@ -637,7 +627,7 @@ impl Form {
             ui,
             Field::OpenIn,
             "A file opens in",
-            "squint is one window with a row of tabs: no file opens a second window.",
+            "One editor window with a row of tabs: opening a file never opens another.",
             options,
             chosen,
         );
@@ -673,7 +663,7 @@ impl Form {
         );
     }
 
-    fn editor_page(&mut self, ui: &mut Ui<Msg>) {
+    fn editor_page(&mut self, ui: &mut Ui<FormMsg>) {
         let Editor {
             line_numbers,
             tab_width,
@@ -711,7 +701,7 @@ impl Form {
         );
     }
 
-    fn appearance_page(&mut self, ui: &mut Ui<Msg>) {
+    fn appearance_page(&mut self, ui: &mut Ui<FormMsg>) {
         let Appearance {
             theme,
             text_font,
@@ -815,7 +805,7 @@ impl Form {
         );
     }
 
-    fn highlighting_page(&mut self, ui: &mut Ui<Msg>) {
+    fn highlighting_page(&mut self, ui: &mut Ui<FormMsg>) {
         let Highlighting {
             enabled,
             theme,
@@ -853,7 +843,7 @@ impl Form {
         }
     }
 
-    fn formatting_page(&mut self, ui: &mut Ui<Msg>) {
+    fn formatting_page(&mut self, ui: &mut Ui<FormMsg>) {
         let Formatting {
             follow_editorconfig,
             indent,
@@ -920,7 +910,7 @@ impl Form {
         (v * self.scale + 0.5) as u16
     }
 
-    fn heading(&mut self, ui: &mut Ui<Msg>, text: &str) {
+    fn heading(&mut self, ui: &mut Ui<FormMsg>, text: &str) {
         if self.y > 0 {
             self.y += self.s(10);
         }
@@ -937,7 +927,7 @@ impl Form {
 
     /// A row: its name on the left, a line about it underneath, and the
     /// control on the right. Returns where the control goes.
-    fn row(&mut self, ui: &mut Ui<Msg>, label: &str, hint: &str) -> Rect {
+    fn row(&mut self, ui: &mut Ui<FormMsg>, label: &str, hint: &str) -> Rect {
         let label_w = (self.page_w * 46 / 100).max(self.s(120));
         let control_w = (self.page_w - label_w - self.s(12)).max(self.s(100));
         let line = self.s(20);
@@ -965,7 +955,7 @@ impl Form {
         control
     }
 
-    fn check(&mut self, ui: &mut Ui<Msg>, field: Field, label: &str, hint: &str, on: bool) {
+    fn check(&mut self, ui: &mut Ui<FormMsg>, field: Field, label: &str, hint: &str, on: bool) {
         let at = self.row(ui, label, hint);
         let widget = Checkbox::new("", ticked)
             .with_checked(on)
@@ -981,7 +971,7 @@ impl Form {
 
     fn select(
         &mut self,
-        ui: &mut Ui<Msg>,
+        ui: &mut Ui<FormMsg>,
         field: Field,
         label: &str,
         hint: &str,
@@ -990,7 +980,7 @@ impl Form {
     ) {
         let at = self.row(ui, label, hint);
         let index = self.controls.len();
-        let widget = Select::new(options.clone(), Msg::Form(FormMsg::OpenSelect(index)))
+        let widget = Select::new(options.clone(), FormMsg::OpenSelect(index))
             .with_selected(chosen)
             .with_style(TextStyle {
                 size_px: self.px(12.0),
@@ -1005,10 +995,10 @@ impl Form {
         }
     }
 
-    fn text(&mut self, ui: &mut Ui<Msg>, field: Field, label: &str, hint: &str, value: String) {
+    fn text(&mut self, ui: &mut Ui<FormMsg>, field: Field, label: &str, hint: &str, value: String) {
         let at = self.row(ui, label, hint);
         let mut widget = TextInput::new()
-            .with_submit(Msg::Form(FormMsg::Submit))
+            .with_submit(FormMsg::Submit)
             .with_max_chars(120)
             .with_size(self.px(12.0));
         widget.set_text(value);
@@ -1023,12 +1013,12 @@ impl Form {
 
     /// A row of buttons across the control column, each saying whether it can
     /// be pressed.
-    fn buttons(&mut self, ui: &mut Ui<Msg>, buttons: &[(&str, Action, bool)]) {
+    fn buttons(&mut self, ui: &mut Ui<FormMsg>, buttons: &[(&str, Action, bool)]) {
         let at = self.row(ui, "", "");
         let gap = self.s(6);
         let width = ((at.width - gap * (buttons.len() as i32 - 1)) / buttons.len() as i32).max(1);
         for (n, (label, action, enabled)) in buttons.iter().enumerate() {
-            let button = Button::new(*label, Msg::Form(FormMsg::Button(*action)))
+            let button = Button::new(*label, FormMsg::Button(*action))
                 .with_size(self.px(11.0))
                 .with_role(Role::Neutral);
             let rect = Rect::new(at.x + n as i32 * (width + gap), at.y, width, self.s(24));
@@ -1162,14 +1152,14 @@ fn editing_mut(settings: &mut Settings) -> Option<&mut CustomTheme> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use denise::{Size, theme};
+    use denise::theme;
 
-    fn form(ui: &mut Ui<Msg>, settings: &Settings) -> Form {
-        Form::open(ui, settings, None, 1.0, TextStyle::built_in(13)).expect("the dialog")
+    fn form(ui: &mut Ui<FormMsg>, settings: &Settings) -> Form {
+        Form::build_in(ui, settings, None, 1.0, TextStyle::built_in(13)).expect("the form")
     }
 
-    fn tree() -> Ui<Msg> {
-        Ui::new(Size::new(900, 600), theme::DARK)
+    fn tree() -> Ui<FormMsg> {
+        Ui::new(crate::settings_window::SIZE, theme::DARK)
     }
 
     /// Every section has rows, and nothing typed is lost walking between them.
@@ -1197,7 +1187,7 @@ mod tests {
             .find(|c| c.field == Field::ReopenTabs)
             .expect("the row")
             .node;
-        ui.widget_mut::<Checkbox<Msg>>(node)
+        ui.widget_mut::<Checkbox<FormMsg>>(node)
             .expect("checkbox")
             .set_checked(false);
         assert_eq!(form.handle(FormMsg::Ticked(false), &mut ui), None);

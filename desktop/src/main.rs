@@ -16,6 +16,7 @@ mod recent;
 mod session;
 mod settings;
 mod settings_form;
+mod settings_window;
 mod stamp;
 mod switcher;
 
@@ -47,10 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `find` after it; with `--formatted`, of the file as ⇧⌘F formats it;
         // with `--menu`, with that menu open from the menu bar in the window;
         // with `--session`, with the tabs a session file lists, which is read
-        // and never written; with `--settings`, with the settings dialog open
-        // at that section, over the settings `--settings-file` names, which is
-        // also read and never written. How a layout is reviewed over SSH and
-        // how the README's pictures are made.
+        // and never written. `--settings [section]` draws the settings window
+        // instead of the editor's, at that section and over the settings
+        // `--settings-file` names, which is read and never written. How a
+        // layout is reviewed over SSH and how the README's pictures are made.
         let formatted = args.iter().any(|a| a == "--formatted");
         let value_of = |flag: &str| {
             args.iter()
@@ -122,13 +123,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             open_path.as_deref(),
             menus,
             app::Remembered::load(),
+            present,
         )
     };
     match run_with(app::App::config(present), open) {
         Err(Error::Gpu(reason) | Error::Present(reason)) if present == Present::Gpu => {
             eprintln!("squint: cannot draw through the GPU ({reason}); drawing in software");
             let open = move |size, scale| {
-                app::App::new(size, scale, path.as_deref(), menus, app::Remembered::load())
+                app::App::new(
+                    size,
+                    scale,
+                    path.as_deref(),
+                    menus,
+                    app::Remembered::load(),
+                    Present::Software,
+                )
             };
             run_with(app::App::config(Present::Software), open)?;
             Ok(())
@@ -153,8 +162,12 @@ fn snapshot(
     settings_file: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use denise::{BufferAge, Frame, PixelFormat, Size};
-    use std::io::Write as _;
 
+    if let Some(section) = settings {
+        // A window of its own is a picture of its own: the flags about the
+        // file, the line and the menus are the editor window's.
+        return settings_snapshot(out, scale, section, settings_file);
+    }
     let logical = app::App::config(Present::Software).size;
     let size = Size::new(
         (logical.width as f32 * scale + 0.5) as u32,
@@ -176,7 +189,14 @@ fn snapshot(
         let saved: config::Kept<session::Session> = config::Kept::load_from(Some(file));
         memory.session = config::Kept::in_memory(saved.get().clone());
     }
-    let mut app = app::App::new(size, scale, path.as_deref(), menus, memory);
+    let mut app = app::App::new(
+        size,
+        scale,
+        path.as_deref(),
+        menus,
+        memory,
+        Present::Software,
+    );
     if formatted {
         app.format_now();
     }
@@ -214,13 +234,62 @@ fn snapshot(
         }
         paint(&mut app);
     }
-    if let Some(section) = settings {
-        app.open_settings_now(section.as_deref());
-        paint(&mut app);
+    write_ppm(out, size, &pixels)
+}
+
+/// Draws the settings window into a PPM file, with no window and no event
+/// loop, over the settings `file` holds — which is read and never written.
+fn settings_snapshot(
+    out: &str,
+    scale: f32,
+    section: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use denise::{BufferAge, Frame, PixelFormat, Size};
+
+    let kept: config::Kept<settings::Settings> = config::Kept::load_from(file);
+    let logical = settings_window::SIZE;
+    let size = Size::new(
+        (logical.width as f32 * scale + 0.5) as u32,
+        (logical.height as f32 * scale + 0.5) as u32,
+    );
+    let mut window = settings_window::SettingsWindow::new(
+        size,
+        scale,
+        kept.get().clone(),
+        None,
+        std::sync::Arc::new(settings_window::Link::default()),
+    );
+    if let Some(name) = section
+        && !window.show_section(&name)
+    {
+        eprintln!("squint: no settings section called {name:?}");
     }
+    let mut pixels = vec![0u32; (size.width * size.height) as usize];
+    let mut frame = Frame::new(
+        &mut pixels,
+        size,
+        size.width,
+        PixelFormat::Xrgb8888,
+        BufferAge::Undefined,
+    )
+    .expect("frame");
+    window.paint_into(&mut frame);
+    drop(frame);
+    write_ppm(out, size, &pixels)
+}
+
+/// Writes one frame's pixels as a PPM file.
+fn write_ppm(
+    out: &str,
+    size: denise::Size,
+    pixels: &[u32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+
     let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);
     write!(file, "P6\n{} {}\n255\n", size.width, size.height)?;
-    for word in &pixels {
+    for word in pixels {
         file.write_all(&[(word >> 16) as u8, (word >> 8) as u8, *word as u8])?;
     }
     file.flush()?;

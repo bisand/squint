@@ -75,9 +75,9 @@ index instead of the lines, and show the file before it has been counted.
   closes open again when it starts, at the lines they were on. A tab behind
   the others does no work until it comes to the front. What squint has been
   told to do — themes, faces, tab stops, what is watched, what is coloured —
-  is one JSON file, with a dialog to edit it:
-  [`settings.rs`](desktop/src/settings.rs) and
-  [`settings_form.rs`](desktop/src/settings_form.rs), and see below.
+  is one JSON file ([`settings.rs`](desktop/src/settings.rs)) edited in a
+  window of its own ([`settings_form.rs`](desktop/src/settings_form.rs) and
+  [`settings_window.rs`](desktop/src/settings_window.rs)), and see below.
 
 | Keys (⌘ on macOS, Ctrl elsewhere) | |
 |---|---|
@@ -106,7 +106,7 @@ cargo run --release -- --time /var/log/system.log        # no window: how long t
 cargo run --release -- --snapshot out.ppm 2 some.log 1 error   # no window: one frame at 2x, at the first "error"
 cargo run --release -- --snapshot menu.ppm 2 some.log --menu File   # no window: with the File menu open in the window
 cargo run --release -- --snapshot tabs.ppm 2 --session tabs.json    # no window: with the tabs a session file lists
-cargo run --release -- --snapshot set.ppm 2 --settings Appearance   # no window: with the settings dialog open at a section
+cargo run --release -- --snapshot set.ppm 2 --settings Appearance   # no window: the settings window, at a section
 cargo run --release -- --format dump.json pretty.json          # no window: pretty-print to a file, or to stdout
 ```
 
@@ -120,9 +120,17 @@ key it does not mention is that setting's default, a value out of range is
 brought back into it, and anything squint cannot read at all is the defaults.
 
 Settings… (⌘, — in the application menu on macOS, under Tools everywhere else)
-is an editor for that file, a section at a time. Save writes it and applies
-it, Apply does both and stays, Cancel drops what was typed, and Edit the File…
-opens `settings.json` itself in a tab.
+is an editor for that file, a section at a time, in a window of its own: it is
+DeniseUI's `Modality::Owned`, so it stays above the editor and closes with it
+while the editor keeps taking input, and a theme can be tried against the file
+it will be read in. Save writes the file and applies it, Apply does both and
+stays open, Cancel drops what was typed — as does closing the window — and
+Edit the File… opens `settings.json` itself in a tab.
+
+The two windows are two applications in one process with no tree between them,
+so they speak through a small queue: the settings window says what it has done
+and the editor takes it up on its next frame. The settings it edits are the
+ones it opened with, so what Save writes is what it showed.
 
 - **General** — reopening the tabs at launch and at the line they were on,
   whether a file takes the empty tab or always a new one, how many recent
@@ -143,8 +151,9 @@ opens `settings.json` itself in a tab.
   `.editorconfig` decides the layout, and the indent, line breaks and final
   newline used where it does not.
 
-squint is one window with a row of tabs; opening a file never opens a second
-window, which is the roadmap's third item rather than a setting.
+Opening a *file* never opens a second window — squint is one editor window
+with a row of tabs, and more than one is the roadmap's third item rather than
+a setting.
 
 ## Roadmap
 

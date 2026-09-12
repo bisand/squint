@@ -27,7 +27,7 @@ use crate::native_menu::NativeMenu;
 use crate::recent::Recent;
 use crate::session::{self, SavedTab, Session, TabColor};
 use crate::settings::{self, OpenIn, Settings};
-use crate::settings_form::{Form, FormMsg, Outcome};
+use crate::settings_window::{Link, SettingsWindow, Word};
 use crate::stamp::Stamp;
 use crate::switcher::{Switcher, TabId};
 use denise::{
@@ -40,7 +40,7 @@ use denise_ui::widgets::{
     open_menu, open_menu_at, shortcut, tab_rect,
 };
 use denise_ui::{Anchors, NodeId, Ui};
-use denise_winit::{DeniseApp, Present, WindowConfig};
+use denise_winit::{DeniseApp, Present, WindowConfig, WindowRequest};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use squint_core::editorconfig::{self, Properties};
 use squint_core::format::{self, Format, Kind, Style};
@@ -50,6 +50,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Bytes indexed per step: a few milliseconds from the page cache.
@@ -63,6 +64,10 @@ const FORMAT_SLICE: usize = 4 * 1024 * 1024;
 
 /// How long one frame may spend walking the file, indexing or finding.
 const SLICE_TIME: Duration = Duration::from_millis(6);
+
+/// How often the editor looks at what the settings window has said, while
+/// there is one open.
+const HEAR_SETTINGS: Duration = Duration::from_millis(50);
 
 /// The sizes Zoom In and Zoom Out step through. Zoom starts from the size the
 /// settings give, and ⌘0 comes back to it.
@@ -82,8 +87,6 @@ pub enum Msg {
     Tab(TabEvent),
     /// Enter in the field renaming a tab.
     Renamed,
-    /// Something happened in the settings dialog.
-    Form(FormMsg),
 }
 
 /// Where the menus are.
@@ -237,9 +240,15 @@ pub struct App {
     #[cfg(target_os = "macos")]
     shown: State,
     memory: Remembered,
-    /// The settings dialog, while it is open.
-    form: Option<Form>,
-    /// Where the settings are kept, for the dialog to say and to open.
+    /// What the settings window is saying, while there is one open.
+    settings: Option<Arc<Link>>,
+    /// Windows asked for and not yet opened: the runner takes them.
+    windows: Vec<WindowRequest>,
+    /// How this window is drawn, so one opened beside it is drawn the same
+    /// way.
+    present: Present,
+    /// Where the settings are kept, for the settings window to say and for
+    /// Edit the File… to open.
     settings_file: Option<PathBuf>,
     /// The faces added to the tree, by the file they came from: a face asked
     /// for twice is added once.
@@ -299,6 +308,7 @@ impl App {
         path: Option<&Path>,
         menus: Menus,
         memory: Remembered,
+        present: Present,
     ) -> Self {
         let px = |v: f32| (v * scale + 0.5) as u16;
         let s = |v: i32| (v as f32 * scale + 0.5) as i32;
@@ -392,7 +402,9 @@ impl App {
             #[cfg(target_os = "macos")]
             shown: State::default(),
             memory,
-            form: None,
+            settings: None,
+            windows: Vec::new(),
+            present,
             settings_file: memory_file,
             faces,
             watch: Duration::from_secs(settings.general.watch_seconds as u64),
@@ -543,24 +555,6 @@ impl App {
             self.pump_syntax();
         }
         self.refresh_status();
-    }
-
-    /// Opens the settings dialog at the section called `section`, as Tools ▸
-    /// Settings… would. For a snapshot. Whether it opened.
-    pub fn open_settings_now(&mut self, section: Option<&str>) -> bool {
-        self.open_settings();
-        let Some(mut form) = self.form.take() else {
-            return false;
-        };
-        let shown = match section {
-            Some(name) => form.show_section(name, &mut self.ui),
-            None => true,
-        };
-        self.form = Some(form);
-        if !shown {
-            eprintln!("squint: no settings section called {section:?}");
-        }
-        true
     }
 
     /// Opens the menu titled `label` from the bar in the window, as a press
@@ -1024,16 +1018,6 @@ impl App {
         }
     }
 
-    /// Lays the settings dialog out again when the window has been resized
-    /// under it.
-    fn settle_form(&mut self) {
-        let Some(mut form) = self.form.take() else {
-            return;
-        };
-        form.resized(&mut self.ui);
-        self.form = Some(form);
-    }
-
     /// A click anywhere else ends a rename, keeping what was typed.
     fn settle_rename(&mut self) {
         if let Some(rename) = &self.rename
@@ -1192,17 +1176,6 @@ impl App {
 
     /// Does what a menu row, or its keys, asks for.
     fn run(&mut self, command: Command) {
-        // The settings dialog is modal, and the system's menu bar on macOS is
-        // outside the window's scenes: a row picked there while the dialog is
-        // up is turned away here, as the keys already are. Quitting is not
-        // turned away — it closes the dialog, dropping what was typed in it,
-        // and goes on to ask about the tabs as usual.
-        if self.form.is_some() {
-            if command != Command::Quit {
-                return;
-            }
-            self.close_settings(false);
-        }
         match command {
             Command::New => {
                 let index = self.add_tab(FileDocument::empty());
@@ -1560,11 +1533,7 @@ impl App {
     /// reloads quietly unless the settings say to ask, and one with changes
     /// always asks.
     fn check_files(&mut self) {
-        if self.last_check.elapsed() < self.watch
-            || self.rename.is_some()
-            || self.ui.popup_open()
-            || self.form.is_some()
-        {
+        if self.last_check.elapsed() < self.watch || self.rename.is_some() || self.ui.popup_open() {
             return;
         }
         self.last_check = Instant::now();
@@ -1639,100 +1608,73 @@ impl App {
 
     // ---- the settings -------------------------------------------------------
 
-    /// Opens the settings dialog over everything, editing a copy of the
-    /// settings. What it does with them comes back through [`Msg::Form`].
+    /// Asks for a settings window, and says so if there is one already: a
+    /// window cannot be raised from here, and a second one editing the same
+    /// file would be two drafts of it.
     fn open_settings(&mut self) {
-        if self.form.is_some() {
+        if self.settings.is_some() {
+            self.say("the settings window is already open".into());
             return;
         }
-        self.close_menu();
-        self.close_prompt();
-        self.finish_rename(true);
-        let settings = self.memory.settings.get().clone();
-        let file = self.settings_file.clone();
-        self.form = Form::open(&mut self.ui, &settings, file, self.scale, self.chrome);
-        if self.form.is_none() {
-            self.say("the settings could not be opened".into());
-        }
+        let link = Arc::new(Link::default());
+        self.windows.push(SettingsWindow::request(
+            self.memory.settings.get().clone(),
+            self.settings_file.clone(),
+            Arc::clone(&link),
+            self.present,
+        ));
+        self.settings = Some(link);
     }
 
-    /// Takes the dialog away. `keep_theme` for a dialog whose settings have
-    /// been applied; without it the theme a preview changed goes back.
-    fn close_settings(&mut self, keep_theme: bool) {
-        let Some(form) = self.form.take() else {
+    /// Acts on what the settings window has said since the last frame. It
+    /// edits the settings as they were when it opened, so what it hands over
+    /// is what it showed — the same bargain as a file edited behind an open
+    /// editor.
+    fn hear_settings(&mut self) {
+        let Some(link) = &self.settings else {
             return;
         };
-        form.close(&mut self.ui, keep_theme);
-        let editor = self.editor_id();
-        self.ui.focus(Some(editor));
-        self.refresh_status();
-    }
-
-    fn form_message(&mut self, msg: FormMsg) {
-        let Some(mut form) = self.form.take() else {
-            return;
-        };
-        let outcome = form.handle(msg, &mut self.ui);
-        self.form = Some(form);
-        match outcome {
-            None => {}
-            Some(Outcome::Apply) => self.save_settings(),
-            Some(Outcome::Save) => {
-                self.save_settings();
-                self.close_settings(true);
-            }
-            Some(Outcome::Close) => self.close_settings(false),
-            Some(Outcome::EditFile) => {
-                self.save_settings();
-                self.close_settings(true);
-                // The settings' real home, opened as what it is: a file —
-                // which is written first, so there is one even if nothing was
-                // changed and nothing had been kept before.
-                self.memory.settings.save();
-                if let Some(file) = self.settings_file.clone() {
-                    self.open_path(&file);
-                } else {
-                    self.say("this squint keeps no settings file".into());
+        let mut closed = false;
+        for word in link.drain() {
+            match word {
+                Word::Apply(settings) => {
+                    if settings != *self.memory.settings.get() {
+                        self.memory.settings.set(settings);
+                    }
+                    self.apply_settings();
+                    self.say(match &self.settings_file {
+                        Some(file) => format!("settings saved to {}", file.display()),
+                        None => "settings applied".into(),
+                    });
                 }
+                // Shown, not kept: only the theme, which is what the settings
+                // window offers to try. Everything else waits for Apply.
+                Word::Preview(settings) => {
+                    let theme = settings.theme().scaled(self.scale);
+                    if *self.ui.theme() != theme {
+                        self.ui.set_theme(theme);
+                    }
+                }
+                Word::EditFile => {
+                    // The settings' real home, opened as what it is: a file —
+                    // written first, so there is one even if nothing was
+                    // changed and nothing had been kept before.
+                    self.memory.settings.save();
+                    match self.settings_file.clone() {
+                        Some(file) => {
+                            self.open_path(&file);
+                        }
+                        None => self.say("this squint keeps no settings file".into()),
+                    }
+                }
+                // Whatever a preview changed goes back to what is kept, which
+                // after a Save is what was just saved.
+                Word::Closed => closed = true,
             }
-            Some(Outcome::PickFont { text }) => self.pick_font(text),
         }
-    }
-
-    /// Writes the dialog's draft to the settings file and applies it.
-    fn save_settings(&mut self) {
-        let Some(draft) = self.form.as_ref().map(|form| form.draft().clone()) else {
-            return;
-        };
-        if draft != *self.memory.settings.get() {
-            self.memory.settings.set(draft);
-        }
-        self.apply_settings();
-        self.say(match &self.settings_file {
-            Some(file) => format!("settings saved to {}", file.display()),
-            None => "settings applied".into(),
-        });
-    }
-
-    /// Picks a TrueType file for the text, or for the chrome, and tells the
-    /// dialog about it. The whole path is what is kept: a face chosen from a
-    /// folder squint does not look in has nothing else to be called.
-    fn pick_font(&mut self, text: bool) {
-        let title = if text {
-            "A face for the text"
-        } else {
-            "A face for the menus, tabs and status line"
-        };
-        let picked = FileDialog::new()
-            .set_title(title)
-            .add_filter("TrueType fonts", &["ttf"])
-            .pick_file();
-        let Some(path) = picked else {
-            return;
-        };
-        let name = path.display().to_string();
-        if let Some(form) = &mut self.form {
-            form.set_font(&mut self.ui, text, name);
+        if closed {
+            self.settings = None;
+            self.apply_settings();
         }
     }
 
@@ -2383,7 +2325,6 @@ impl App {
             Msg::Menu(event) => self.menu_event(event),
             Msg::Tab(event) => self.tab_event(event),
             Msg::Renamed => self.finish_rename(true),
-            Msg::Form(msg) => self.form_message(msg),
         }
     }
 
@@ -2623,17 +2564,6 @@ impl DeniseApp for App {
             match event {
                 // Answered by `close_requested`, which could still say no.
                 InputEvent::CloseRequested => continue,
-                // The settings dialog is over everything, so it answers first:
-                // Escape closes it, and the window's own keys are not the
-                // dialog's to take.
-                InputEvent::Key {
-                    code: KeyCode::Escape,
-                    state: ElementState::Down,
-                    ..
-                } if self.form.is_some() && !menu_up => {
-                    self.close_settings(false);
-                    continue;
-                }
                 InputEvent::Key {
                     code: KeyCode::Escape,
                     state: ElementState::Down,
@@ -2685,7 +2615,7 @@ impl DeniseApp for App {
                     state: ElementState::Down,
                     modifiers,
                     ..
-                } if !menu_up && self.form.is_none() => {
+                } if !menu_up => {
                     if let Some(command) = menu::shortcut(*code, *modifiers) {
                         self.run(command);
                         continue;
@@ -2699,7 +2629,6 @@ impl DeniseApp for App {
         self.ui.tick(self.started.elapsed().as_millis() as u64);
         self.settle_menu();
         let acted = self.drain();
-        self.settle_form();
         self.settle_rename();
         self.sync_highlight();
         self.pump_index();
@@ -2708,6 +2637,7 @@ impl DeniseApp for App {
         self.pump_format();
         self.pump_syntax();
         self.check_files();
+        self.hear_settings();
         self.sync_strip();
         #[cfg(target_os = "macos")]
         self.sync_menus();
@@ -2735,6 +2665,12 @@ impl DeniseApp for App {
         self.ui.paint_with(pen, age);
         self.ui.presented();
         true
+    }
+
+    /// The windows asked for since the last frame: the settings window, when
+    /// Settings… has been picked.
+    fn take_windows(&mut self) -> Vec<WindowRequest> {
+        std::mem::take(&mut self.windows)
     }
 
     fn exit_requested(&self) -> bool {
@@ -2781,10 +2717,12 @@ impl DeniseApp for App {
         let files = self
             .watching()
             .then(|| self.watch.saturating_sub(self.last_check.elapsed()));
-        match (animation, files) {
-            (Some(a), Some(f)) => Some(a.min(f)),
-            (a, f) => a.or(f),
-        }
+        // And, while the settings window is open, often enough to hear it: the
+        // two windows have their own frames and no way to wake each other, so
+        // an editor asleep on input would not take up a Save until something
+        // happened to it.
+        let settings = self.settings.is_some().then_some(HEAR_SETTINGS);
+        [animation, files, settings].into_iter().flatten().min()
     }
 }
 
@@ -2794,7 +2732,6 @@ mod tests {
     use crate::config::Kept;
     use crate::recent::Recent;
     use crate::session::Session;
-    use crate::settings_form::Action;
 
     fn window(settings: Kept<Settings>) -> App {
         window_with(settings, Menus::Off)
@@ -2811,6 +2748,7 @@ mod tests {
                 settings,
                 session: Kept::in_memory(Session::default()),
             },
+            Present::Software,
         )
     }
 
@@ -2836,20 +2774,43 @@ mod tests {
         assert!(app.tabs[app.active].read_only, "a tab opens read only");
     }
 
-    /// Save writes the file and makes the window what it says; the dialog
-    /// closes behind it.
+    /// Settings… asks the runner for a window, and only ever one: a second
+    /// would be a second draft of the same file.
     #[test]
-    fn saving_the_dialog_writes_the_settings_and_applies_them() {
+    fn settings_asks_for_one_window() {
+        let mut app = window(Kept::in_memory(Settings::default()));
+        app.run(Command::Settings);
+        assert_eq!(app.take_windows().len(), 1);
+        assert!(app.settings.is_some(), "it is open until it says otherwise");
+        app.run(Command::Settings);
+        assert!(app.take_windows().is_empty(), "no second window");
+
+        // The editor is not blocked while it is open: this is Owned, not modal.
+        app.run(Command::New);
+        assert_eq!(app.tabs.len(), 2);
+
+        app.settings.clone().expect("the link").say(Word::Closed);
+        app.hear_settings();
+        assert!(app.settings.is_none());
+        app.run(Command::Settings);
+        assert_eq!(app.take_windows().len(), 1, "and it opens again after");
+    }
+
+    /// What the settings window hands over is written to the file and applied.
+    #[test]
+    fn what_the_settings_window_hands_over_is_written_and_applied() {
         let dir = tempfile::tempdir().expect("dir");
         let file = dir.path().join("settings.json");
         let mut app = window(Kept::load_from(Some(file.clone())));
         app.run(Command::Settings);
-        let form = app.form.as_mut().expect("the dialog");
-        form.draft_mut().appearance.text_size = 22;
-        form.draft_mut().editor.line_numbers = false;
-        app.form_message(FormMsg::Button(Action::Save));
+        let link = app.settings.clone().expect("the link");
 
-        assert!(app.form.is_none(), "Save closes the dialog");
+        let mut saved = Settings::default();
+        saved.appearance.text_size = 22;
+        saved.editor.line_numbers = false;
+        link.say(Word::Apply(saved));
+        app.hear_settings();
+
         assert_eq!(app.text_size, 22);
         assert!(!app.gutter);
         let written: Settings =
@@ -2858,29 +2819,27 @@ mod tests {
         assert!(!written.editor.line_numbers);
     }
 
-    /// A theme tried in the dialog is seen at once and put back by Cancel,
-    /// which writes nothing.
+    /// A theme being chosen is shown at once and put back when the window
+    /// closes without saving it, which writes nothing.
     #[test]
-    fn cancelling_puts_the_theme_back_and_writes_nothing() {
+    fn a_previewed_theme_goes_back_when_the_window_closes() {
         let dir = tempfile::tempdir().expect("dir");
         let file = dir.path().join("settings.json");
         let mut app = window(Kept::load_from(Some(file.clone())));
-        assert_eq!(app.ui.theme().name, "dark");
         app.run(Command::Settings);
-        app.form
-            .as_mut()
-            .expect("the dialog")
-            .draft_mut()
-            .appearance
-            .theme = "light".into();
-        // Anything happening in the dialog shows the draft's theme.
-        app.form_message(FormMsg::Ticked(true));
+        let link = app.settings.clone().expect("the link");
+        assert_eq!(app.ui.theme().name, "dark");
+
+        let mut trying = Settings::default();
+        trying.appearance.theme = "light".into();
+        link.say(Word::Preview(trying));
+        app.hear_settings();
         assert_eq!(app.ui.theme().name, "light", "seen while it is chosen");
 
-        app.form_message(FormMsg::Button(Action::Cancel));
-        assert!(app.form.is_none());
+        link.say(Word::Closed);
+        app.hear_settings();
         assert_eq!(app.ui.theme().name, "dark", "back to what it was");
-        assert!(!file.exists(), "Cancel writes nothing");
+        assert!(!file.exists(), "nothing was saved");
     }
 
     /// A bigger chrome makes the menus and tabs taller, and the text below
@@ -2900,22 +2859,6 @@ mod tests {
             Some(app.page_top),
             "the text starts under them"
         );
-    }
-
-    /// While the dialog is up nothing else happens to the window, whichever
-    /// menu bar a row is picked from — and quitting closes it first.
-    #[test]
-    fn the_dialog_is_modal_to_the_menus_too() {
-        let mut app = window(Kept::in_memory(Settings::default()));
-        app.run(Command::Settings);
-        assert!(app.form.is_some());
-        app.run(Command::New);
-        assert_eq!(app.tabs.len(), 1, "no tab was opened behind the dialog");
-        app.run(Command::LineNumbers);
-        assert!(app.gutter, "nothing was toggled behind it");
-        app.run(Command::Quit);
-        assert!(app.form.is_none(), "quitting closes the dialog first");
-        assert!(app.exit);
     }
 
     /// The View menu's Line Numbers is the settings' line numbers.
