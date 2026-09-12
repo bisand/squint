@@ -59,8 +59,13 @@ index instead of the lines, and show the file before it has been counted.
   trick as the line index. A line that parse has
   not reached is coloured from 256 lines above it, which is right unless a
   comment or string opened further up, and is put right when the parse gets
-  there. Files over 16 MB are only ever coloured that way, and a line longer
-  than 16 KB is left uncoloured.
+  there. Files over 16 MB are only ever coloured that way. What colouring
+  costs does not grow with the file — only what is drawn is parsed — but it
+  does grow with the length of a line, so the reach around a line drawn is
+  held to 64 KB of text as well as to those 256 lines, by the document's own
+  average line: a file whose lines are kilobytes long is coloured from a few
+  lines above rather than from 256, which would be megabytes of syntect
+  inside a paint. A line longer than 16 KB is left uncoloured altogether.
 - **The text is drawn in Fira Code's Nerd Font**, where the machine has one:
   squint looks for the monospaced build of it first — in the places fonts
   live for everybody and in this user's own font folder — and falls back
@@ -165,7 +170,9 @@ ones it opened with, so what Save writes is what it showed.
   seed colours are edited here — shown as they are chosen, and put back by
   Cancel. The faces are the settings', not a theme's: a theme is colours.
 - **Highlighting** — whether syntect colours the text, which of its themes it
-  colours with, and the size past which a file is left alone.
+  colours with, and the size past which a file is left alone. That size is a
+  gigabyte and it is there for taste rather than for speed: colouring a file
+  costs what is on screen, whatever the file weighs.
 - **Formatting** — what ⇧⌘F writes: whether the source's project's
   `.editorconfig` decides the layout, and the indent, line breaks and final
   newline used where it does not.

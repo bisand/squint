@@ -132,8 +132,14 @@ pub struct Highlighting {
     pub enabled: bool,
     /// One of syntect's themes, by name.
     pub theme: String,
-    /// A file bigger than this many megabytes is not coloured at all: the
-    /// grammars would be loaded for a file nobody reads as source.
+    /// A file bigger than this many megabytes is not coloured at all.
+    ///
+    /// Not what keeps a big file quick: what colouring costs does not grow
+    /// with the file, because only what is drawn is ever parsed. That is held
+    /// down by the byte budget around each line drawn and by the parse from
+    /// the top stopping at 16 MB, both of them squint's own. This is for the
+    /// file somebody would rather was left plain, and it sits high enough to
+    /// be out of the way until it is asked for.
     pub max_mb: u64,
 }
 
@@ -263,7 +269,7 @@ impl Default for Highlighting {
         Self {
             enabled: true,
             theme: squint_core::syntax::DEFAULT_THEME.into(),
-            max_mb: 64,
+            max_mb: 1024,
         }
     }
 }

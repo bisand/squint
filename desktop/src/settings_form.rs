@@ -837,7 +837,7 @@ impl Form {
                 ui,
                 Field::MaxMb,
                 "Only files up to (MB)",
-                "A bigger file is left uncoloured: the grammars are not worth loading for it.",
+                "A bigger file is left uncoloured. Only what is on screen is ever parsed, so raising this costs nothing.",
                 max_mb.to_string(),
             );
         }

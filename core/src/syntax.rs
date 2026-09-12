@@ -16,6 +16,12 @@
 //! - **Only guessed, past a size.** A file bigger than [`BACKGROUND_LIMIT`] is
 //!   not parsed from the top at all; what is on screen is parsed, and nothing
 //!   else.
+//! - **As far back as the bytes allow.** However far a parse would reach —
+//!   the guess above, the line the last one stopped at, a snapshot — it is
+//!   held to [`LOOKBACK_BYTES`] of text, by the document's own average line.
+//!   syntect's work is in the bytes, so a file whose lines are kilobytes long
+//!   is one where reaching a fixed number of lines back means megabytes of
+//!   parsing inside a paint.
 //!
 //! The grammars are syntect's defaults — the Sublime Text packages `bat` also
 //! uses — and take tens of milliseconds and a few megabytes to load, so they
@@ -39,11 +45,30 @@ use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 /// Lines between the snapshots the parse from the top keeps.
 pub const STRIDE: u64 = 512;
 
-/// How far above a line the parse for it starts, when nothing better is known.
+/// How far above a line the parse for it starts, when nothing better is known
+/// and the lines are short enough for [`LOOKBACK_BYTES`] to allow it.
 pub const LOOKBACK: u64 = 256;
 
-/// Lines parsed past the one asked for, so the rest of a screen is ready.
+/// Lines parsed past the one asked for, so the rest of a screen is ready, as
+/// far as [`PREFETCH_BYTES`] allows.
 const PREFETCH: u64 = 96;
+
+/// Bytes a parse may run through above the line it was asked for, whatever
+/// number of lines that turns out to be.
+///
+/// [`Syntax::runs`] is called while a frame is painting, with no deadline to
+/// stop it, and syntect's cost is in the bytes and not the lines: 256 lines of
+/// source is a few kilobytes, and 256 lines of machine-written JSON or CSV can
+/// be megabytes. A file of long lines reaching a fixed number of lines back is
+/// what stalls a frame — and a cap on how big the file is cannot see that,
+/// because it has nothing to do with how big the file is. Whatever is drawn is
+/// parsed regardless; this bounds what is parsed speculatively around it.
+pub const LOOKBACK_BYTES: u64 = 64 * 1024;
+
+/// Bytes parsed past the line asked for, bounding the prefetch the same way
+/// and for the same reason. Stopping short costs nothing but another walk:
+/// the next line asked for carries on from where this one stopped.
+const PREFETCH_BYTES: u64 = 64 * 1024;
 
 /// A longer line is not parsed: it is left uncoloured and the state is carried
 /// across it unchanged. Minified documents are one such line, and syntect on
@@ -353,7 +378,8 @@ impl Syntax {
         let theme = theme();
         let highlighter = Highlighter::new(theme);
         let plain = theme.settings.foreground.unwrap_or(Color::WHITE);
-        let (start, mut state, exact) = self.start_for(line, &highlighter);
+        let (behind, ahead) = reach(doc);
+        let (start, mut state, exact) = self.start_for(line, behind, &highlighter);
         let cache = &mut self.cache;
         let mut scratch = String::new();
         let mut next = start;
@@ -369,7 +395,7 @@ impl Syntax {
             );
             cache.insert(i, Cached { runs, exact });
             next = i + 1;
-            i < line + PREFETCH
+            i < line + PREFETCH.min(ahead)
         })?;
         self.cursor = Some((next, state, exact));
         if let Some(hit) = self.cache.get(&line) {
@@ -380,10 +406,19 @@ impl Syntax {
 
     /// Where to parse from for `line`, in what state, and whether that state
     /// is known to be right.
-    fn start_for(&self, line: u64, highlighter: &Highlighter) -> (u64, State, bool) {
-        let near = |from: u64| from <= line && line - from <= LOOKBACK;
+    ///
+    /// `behind` is how many lines above `line` the bytes allow running
+    /// through, and every way of starting is held to it — the snapshot below
+    /// the frontier included. Refusing a snapshot means guessing where an
+    /// exact state was there for the taking, which costs exactness across a
+    /// comment or a string opened above; the files it is refused on are the
+    /// long-lined ones, JSON and XML and CSV, which have no such thing in
+    /// them. It is the argument [`BACKGROUND_LIMIT`] makes, one line at a
+    /// time.
+    fn start_for(&self, line: u64, behind: u64, highlighter: &Highlighter) -> (u64, State, bool) {
+        let near = |from: u64, lines: u64| from <= line && line - from <= lines.min(behind);
         if let Some((next, state, exact)) = &self.cursor
-            && near(*next)
+            && near(*next, LOOKBACK)
             && (*exact || line >= self.frontier.0)
         {
             return (*next, state.clone(), *exact);
@@ -391,12 +426,15 @@ impl Syntax {
         let (front, front_state) = &self.frontier;
         if line < *front {
             let k = ((line / STRIDE) as usize).min(self.snapshots.len() - 1);
-            return (k as u64 * STRIDE, self.snapshots[k].clone(), true);
+            let at = k as u64 * STRIDE;
+            if near(at, STRIDE) {
+                return (at, self.snapshots[k].clone(), true);
+            }
         }
-        if near(*front) {
+        if near(*front, LOOKBACK) {
             return (*front, front_state.clone(), true);
         }
-        let start = line.saturating_sub(LOOKBACK);
+        let start = line.saturating_sub(LOOKBACK.min(behind));
         (start, State::new(self.syntax, highlighter), start == 0)
     }
 
@@ -412,6 +450,28 @@ impl Syntax {
         self.cursor = None;
         self.cache.clear();
     }
+}
+
+/// How far a parse for one line may reach, in lines: above it and past it, as
+/// many lines as [`LOOKBACK_BYTES`] and [`PREFETCH_BYTES`] buy at this
+/// document's average line length.
+///
+/// The average is the document's and not the lines in question, because the
+/// files this guards against — machine-written JSON, CSV, XML, a log with a
+/// payload on every line — are long-lined all the way through, and an average
+/// is two cheap questions to the document where measuring the lines around
+/// `line` would be another walk through the index for every line drawn.
+///
+/// Both are the bytes alone, to be held against the line counts they bound —
+/// [`LOOKBACK`] above, [`STRIDE`] for a snapshot, [`PREFETCH`] past — because
+/// those differ and this does not.
+fn reach(doc: &mut Document) -> (u64, u64) {
+    let lines = doc.known_lines().unwrap_or(0);
+    let avg = match lines {
+        0 => 1,
+        n => (doc.len() / n).max(1),
+    };
+    (LOOKBACK_BYTES / avg, PREFETCH_BYTES / avg)
 }
 
 /// Hands `f` each line from `from` on, in order — `None` for one longer than
@@ -588,6 +648,63 @@ mod tests {
         let mut d = doc(&format!("let a = 1;\nlet b = \"{long}\";\nlet c = 3;\n"));
         assert!(runs(&mut s, &mut d, 1).is_empty());
         assert!(colour_at(&runs(&mut s, &mut d, 2), 0).is_some());
+    }
+
+    #[test]
+    fn a_parse_for_a_line_of_a_long_lined_file_starts_just_above_it() {
+        // Lines a quarter of the byte budget each: four of them fit, so a
+        // parse reaches four lines back and not LOOKBACK.
+        let long = "x".repeat(LOOKBACK_BYTES as usize / 4 - 1);
+        let mut d = doc(&format!("{long}\n").repeat(40));
+        assert_eq!(reach(&mut d).0, 4);
+
+        // And a file of ordinary lines is untouched by it: the line counts
+        // still decide.
+        let mut short = doc(&"let x = 1;\n".repeat(4000));
+        let (behind, ahead) = reach(&mut short);
+        assert!(behind > LOOKBACK, "{behind} lines of source fit");
+        assert!(ahead > PREFETCH, "{ahead} lines of source fit");
+    }
+
+    #[test]
+    fn long_lines_are_parsed_from_near_the_line_asked_for() {
+        // Eight lines of an eighth of the budget: a parse for line 30 can
+        // afford eight above it, not the 30 a fresh guess would take.
+        let long = format!("// {}", "x".repeat(LOOKBACK_BYTES as usize / 8));
+        let mut d = doc(&format!("{long}\n").repeat(60));
+        let s = rust();
+        let behind = reach(&mut d).0;
+        let (start, _, exact) = s.start_for(30, behind, &Highlighter::new(theme()));
+        assert!(start >= 30 - behind, "no further back than the bytes allow");
+        assert!(start > 0 && !exact, "which is a guess, not the top");
+
+        // The same file with short lines reaches all the way to the top,
+        // where the state is the real one.
+        let mut d = doc(&"let x = 1;\n".repeat(60));
+        let behind = reach(&mut d).0;
+        let (start, _, exact) = s.start_for(30, behind, &Highlighter::new(theme()));
+        assert_eq!((start, exact), (0, true));
+    }
+
+    /// Below the frontier a snapshot is exact and worth up to STRIDE lines of
+    /// parsing — unless those lines are long, where it is worth a stalled
+    /// frame, and a guess nearer the line is taken instead.
+    #[test]
+    fn a_snapshot_too_far_back_in_bytes_is_not_taken() {
+        let mut s = rust();
+        let mut d = doc(&"let x = 1;\n".repeat(2000));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !s.advance(&mut d, deadline).unwrap() {}
+        let highlighter = Highlighter::new(theme());
+
+        // Line 1000 sits 488 lines past the snapshot at 512, inside STRIDE.
+        let plenty = reach(&mut d).0;
+        assert_eq!(s.start_for(1000, plenty, &highlighter).0, 512);
+
+        // With only 100 lines' worth of bytes to spend, it is not taken.
+        let (start, _, exact) = s.start_for(1000, 100, &highlighter);
+        assert_eq!(start, 1000 - LOOKBACK.min(100));
+        assert!(!exact);
     }
 
     #[test]
