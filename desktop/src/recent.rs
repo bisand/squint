@@ -4,11 +4,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// How many are kept.
+/// How many are kept, until the settings say otherwise.
 const KEEP: usize = 10;
 
 pub struct Recent {
     paths: Vec<PathBuf>,
+    /// How many are kept: the settings' doing. None kept is a list turned off,
+    /// which is emptied rather than left where somebody could still read it.
+    keep: usize,
     /// Where the list is kept, or `None` for a list that is never written.
     file: Option<PathBuf>,
 }
@@ -28,7 +31,11 @@ impl Recent {
                     .collect()
             })
             .unwrap_or_default();
-        Self { paths, file }
+        Self {
+            paths,
+            keep: KEEP,
+            file,
+        }
     }
 
     /// An empty list that is never written: for a snapshot, which should leave
@@ -36,7 +43,20 @@ impl Recent {
     pub fn in_memory() -> Self {
         Self {
             paths: Vec::new(),
+            keep: KEEP,
             file: None,
+        }
+    }
+
+    /// Keeps only so many from now on, and drops any past that.
+    pub fn set_limit(&mut self, keep: usize) {
+        if self.keep == keep {
+            return;
+        }
+        self.keep = keep;
+        if self.paths.len() > keep {
+            self.paths.truncate(keep);
+            self.store();
         }
     }
 
@@ -45,11 +65,14 @@ impl Recent {
         &self.paths
     }
 
-    /// Puts `path` at the top, once.
+    /// Puts `path` at the top, once. A list of none keeps nothing at all.
     pub fn add(&mut self, path: &Path) {
+        if self.keep == 0 {
+            return;
+        }
         self.paths.retain(|p| p != path);
         self.paths.insert(0, path.to_path_buf());
-        self.paths.truncate(KEEP);
+        self.paths.truncate(self.keep);
         self.store();
     }
 

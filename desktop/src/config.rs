@@ -48,6 +48,12 @@ impl<T: Serialize + DeserializeOwned + Default> Kept<T> {
         &self.value
     }
 
+    /// Where the value is kept, for something that has to say so — or `None`
+    /// for a value that is never written.
+    pub fn file(&self) -> Option<&Path> {
+        self.file.as_deref()
+    }
+
     /// Changes the value and writes it.
     pub fn update(&mut self, change: impl FnOnce(&mut T)) {
         change(&mut self.value);
@@ -57,6 +63,12 @@ impl<T: Serialize + DeserializeOwned + Default> Kept<T> {
     /// Replaces the value and writes it.
     pub fn set(&mut self, value: T) {
         self.value = value;
+        self.store();
+    }
+
+    /// Writes the value as it is: for a file somebody is about to be shown,
+    /// which should be there even if nothing has changed.
+    pub fn save(&self) {
         self.store();
     }
 

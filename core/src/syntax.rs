@@ -17,17 +17,19 @@
 //!   not parsed from the top at all; what is on screen is parsed, and nothing
 //!   else.
 //!
-//! The grammars and theme are syntect's defaults — the Sublime Text packages
-//! `bat` also uses — and take tens of milliseconds and a few megabytes to
-//! load, so they load on a thread, and only for a file that has a grammar.
+//! The grammars are syntect's defaults — the Sublime Text packages `bat` also
+//! uses — and take tens of milliseconds and a few megabytes to load, so they
+//! load on a thread, and only for a file that has a grammar. The colours are
+//! one of syntect's themes: [`DEFAULT_THEME`] until [`set_theme`] names
+//! another, which is how a front end offers a choice of them.
 
 use crate::document::Document;
 use crate::format;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 use syntect::highlighting::{
     Color, HighlightIterator, HighlightState, Highlighter, Theme, ThemeSet,
@@ -61,27 +63,71 @@ pub const BACKGROUND_LIMIT: u64 = 16 * 1024 * 1024;
 /// Coloured lines kept; past this the cache starts again.
 const CACHE_LIMIT: usize = 8192;
 
-/// The theme, chosen to sit on squint's dark background.
-const THEME: &str = "base16-ocean.dark";
+/// The theme used when none is chosen, which sits on squint's dark background.
+pub const DEFAULT_THEME: &str = "base16-ocean.dark";
 
 struct Assets {
     syntaxes: SyntaxSet,
-    theme: Theme,
+    themes: ThemeSet,
 }
 
 static ASSETS: OnceLock<Assets> = OnceLock::new();
 static LOADING: AtomicBool = AtomicBool::new(false);
+/// The theme asked for, which need not be loaded — or known — yet.
+static CHOSEN: RwLock<String> = RwLock::new(String::new());
+/// Something to colour with when the themes hold nothing at all.
+static FALLBACK: OnceLock<Theme> = OnceLock::new();
 
-/// Loads the grammars and the theme if they are not loaded yet, and waits
+/// Loads the grammars and the themes if they are not loaded yet, and waits
 /// for them. Where a frame is waiting, use [`load_in_background`].
 pub fn load() {
-    ASSETS.get_or_init(|| {
-        let mut themes = ThemeSet::load_defaults();
-        Assets {
-            syntaxes: SyntaxSet::load_defaults_newlines(),
-            theme: themes.themes.remove(THEME).unwrap_or_default(),
-        }
+    ASSETS.get_or_init(|| Assets {
+        syntaxes: SyntaxSet::load_defaults_newlines(),
+        themes: ThemeSet::load_defaults(),
     });
+}
+
+/// Colours the text with the theme called `name` from here on. A name the
+/// themes do not hold falls back to [`DEFAULT_THEME`], so a settings file
+/// naming a theme this syntect does not have still colours.
+///
+/// What is already parsed keeps the colours it was parsed with: the caller
+/// starts the affected documents' highlighting again.
+pub fn set_theme(name: &str) {
+    if let Ok(mut chosen) = CHOSEN.write() {
+        chosen.clear();
+        chosen.push_str(name);
+    }
+}
+
+/// The theme asked for, whether or not it is one of the themes there are.
+pub fn theme_name() -> String {
+    CHOSEN
+        .read()
+        .ok()
+        .map(|chosen| chosen.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| DEFAULT_THEME.to_string())
+}
+
+/// Every theme syntect ships, in order. Loads the grammars, so call it off a
+/// frame — a settings dialog opening is one.
+pub fn theme_names() -> Vec<String> {
+    let assets = assets();
+    assets.themes.themes.keys().cloned().collect()
+}
+
+/// The theme the colours come from: the one chosen, the default, or anything
+/// at all rather than nothing.
+fn theme() -> &'static Theme {
+    let assets = assets();
+    let chosen = CHOSEN.read().ok().map(|name| name.clone());
+    chosen
+        .filter(|name| !name.is_empty())
+        .and_then(|name| assets.themes.themes.get(&name))
+        .or_else(|| assets.themes.themes.get(DEFAULT_THEME))
+        .or_else(|| assets.themes.themes.values().next())
+        .unwrap_or_else(|| FALLBACK.get_or_init(Theme::default))
 }
 
 /// Starts [`load`] on a thread of its own, once.
@@ -150,6 +196,7 @@ impl State {
         text: Option<&str>,
         highlighter: &Highlighter,
         assets: &Assets,
+        plain: Color,
         scratch: &mut String,
         mut out: Option<&mut Vec<Run>>,
     ) {
@@ -163,7 +210,6 @@ impl State {
         let Ok(ops) = self.parse.parse_line(scratch, &assets.syntaxes) else {
             return;
         };
-        let plain = assets.theme.settings.foreground.unwrap_or(Color::WHITE);
         let mut at = 0;
         for (style, piece) in HighlightIterator::new(&mut self.high, &ops, scratch, highlighter) {
             let end = (at + piece.len()).min(text.len());
@@ -234,7 +280,7 @@ impl Syntax {
         if syntax.name == set.find_syntax_plain_text().name {
             return None;
         }
-        let start = State::new(syntax, &Highlighter::new(&assets.theme));
+        let start = State::new(syntax, &Highlighter::new(theme()));
         Some(Self {
             syntax,
             snapshots: vec![start.clone()],
@@ -269,7 +315,9 @@ impl Syntax {
             return Ok(false);
         }
         let assets = assets();
-        let highlighter = Highlighter::new(&assets.theme);
+        let theme = theme();
+        let highlighter = Highlighter::new(theme);
+        let plain = theme.settings.foreground.unwrap_or(Color::WHITE);
         let (mut line, mut state) = (self.frontier.0, self.frontier.1.clone());
         let snapshots = &mut self.snapshots;
         let mut scratch = String::new();
@@ -278,7 +326,7 @@ impl Syntax {
             if i % STRIDE == 0 && snapshots.len() as u64 == i / STRIDE {
                 snapshots.push(state.clone());
             }
-            state.feed(text, &highlighter, assets, &mut scratch, None);
+            state.feed(text, &highlighter, assets, plain, &mut scratch, None);
             line = i + 1;
             parsed += 1;
             // The clock is read every so many lines, not every one.
@@ -302,14 +350,23 @@ impl Syntax {
             self.cache.clear();
         }
         let assets = assets();
-        let highlighter = Highlighter::new(&assets.theme);
+        let theme = theme();
+        let highlighter = Highlighter::new(theme);
+        let plain = theme.settings.foreground.unwrap_or(Color::WHITE);
         let (start, mut state, exact) = self.start_for(line, &highlighter);
         let cache = &mut self.cache;
         let mut scratch = String::new();
         let mut next = start;
         each_line(doc, start, |i, text| {
             let mut runs = Vec::new();
-            state.feed(text, &highlighter, assets, &mut scratch, Some(&mut runs));
+            state.feed(
+                text,
+                &highlighter,
+                assets,
+                plain,
+                &mut scratch,
+                Some(&mut runs),
+            );
             cache.insert(i, Cached { runs, exact });
             next = i + 1;
             i < line + PREFETCH

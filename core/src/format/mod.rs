@@ -103,12 +103,20 @@ impl Default for Style {
 }
 
 impl Style {
-    /// The defaults, with what EditorConfig sets over them: `indent_style`,
+    /// The defaults, with what EditorConfig sets over them. See
+    /// [`with_editorconfig`](Style::with_editorconfig).
+    pub fn from_editorconfig(props: &Properties) -> Self {
+        Self::default().with_editorconfig(props)
+    }
+
+    /// This style, with what EditorConfig sets over it: `indent_style`,
     /// `indent_size` (a width, or `tab`), `tab_width`, `end_of_line` and
     /// `insert_final_newline`. A value the spec does not allow is ignored, as
-    /// the spec asks.
-    pub fn from_editorconfig(props: &Properties) -> Self {
-        let mut style = Self::default();
+    /// the spec asks, so what a project does not decide is left as it was —
+    /// which is how a front end offers a layout of its own and still lets a
+    /// project overrule it.
+    pub fn with_editorconfig(self, props: &Properties) -> Self {
+        let mut style = self;
         let width = |key: &str| {
             props
                 .get(key)

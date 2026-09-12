@@ -15,6 +15,7 @@ mod native_menu;
 mod recent;
 mod session;
 mod settings;
+mod settings_form;
 mod stamp;
 mod switcher;
 
@@ -41,13 +42,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.first().map(String::as_str) == Some("--snapshot") {
         // `squint --snapshot out.ppm [scale] [file] [line] [find] [--formatted]
-        // [--menu <title>] [--session <file>]`: one frame, no window, scrolled
-        // to `line` and then to the first match of `find` after it; with
-        // `--formatted`, of the file as ⇧⌘F formats it; with `--menu`, with
-        // that menu open from the menu bar in the window; with `--session`,
-        // with the tabs a session file lists, which is read and never written.
-        // How a layout is reviewed over SSH and how the README's pictures are
-        // made.
+        // [--menu <title>] [--session <file>] [--settings [section]]`: one
+        // frame, no window, scrolled to `line` and then to the first match of
+        // `find` after it; with `--formatted`, of the file as ⇧⌘F formats it;
+        // with `--menu`, with that menu open from the menu bar in the window;
+        // with `--session`, with the tabs a session file lists, which is read
+        // and never written; with `--settings`, with the settings dialog open
+        // at that section, over the settings `--settings-file` names, which is
+        // also read and never written. How a layout is reviewed over SSH and
+        // how the README's pictures are made.
         let formatted = args.iter().any(|a| a == "--formatted");
         let value_of = |flag: &str| {
             args.iter()
@@ -57,6 +60,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let menu = value_of("--menu");
         let session = value_of("--session").map(PathBuf::from);
+        let settings_file = value_of("--settings-file").map(PathBuf::from);
+        // `--settings` alone is the first section; `--settings Appearance` is
+        // that one. The section is not a value when what follows is a flag.
+        let settings = args
+            .iter()
+            .position(|a| a == "--settings")
+            .map(|i| args.get(i + 1).filter(|a| !a.starts_with("--")).cloned());
+        let settings_section = settings.clone().flatten();
         let mut value = false;
         let args: Vec<&str> = args
             .iter()
@@ -65,8 +76,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if std::mem::take(&mut value) {
                     return false;
                 }
-                value = matches!(*a, "--menu" | "--session");
-                !value && *a != "--formatted"
+                if Some(a.to_string()) == settings_section {
+                    return false;
+                }
+                value = matches!(*a, "--menu" | "--session" | "--settings-file");
+                !value && *a != "--formatted" && *a != "--settings"
             })
             .collect();
         let out = args.get(1).copied().unwrap_or("squint.ppm");
@@ -74,7 +88,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let path = args.get(3).map(PathBuf::from);
         let line: Option<usize> = args.get(4).and_then(|a| a.parse().ok());
         let query = args.get(5).map(|a| a.to_string());
-        return snapshot(out, scale, path, formatted, line, query, menu, session);
+        return snapshot(
+            out,
+            scale,
+            path,
+            formatted,
+            line,
+            query,
+            menu,
+            session,
+            settings,
+            settings_file,
+        );
     }
     let path: Option<PathBuf> = args
         .iter()
@@ -124,6 +149,8 @@ fn snapshot(
     query: Option<String>,
     menu: Option<String>,
     session: Option<PathBuf>,
+    settings: Option<Option<String>>,
+    settings_file: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use denise::{BufferAge, Frame, PixelFormat, Size};
     use std::io::Write as _;
@@ -140,6 +167,10 @@ fn snapshot(
         _ => app::Menus::Window,
     };
     let mut memory = app::Remembered::in_memory();
+    if let Some(file) = settings_file {
+        let saved: config::Kept<settings::Settings> = config::Kept::load_from(Some(file));
+        memory.settings = config::Kept::in_memory(saved.get().clone());
+    }
     if let Some(file) = session {
         // Read, and kept in memory: a snapshot leaves the file as it found it.
         let saved: config::Kept<session::Session> = config::Kept::load_from(Some(file));
@@ -181,6 +212,10 @@ fn snapshot(
         if !app.open_menu_titled(&title) {
             eprintln!("squint: no menu called {title:?}");
         }
+        paint(&mut app);
+    }
+    if let Some(section) = settings {
+        app.open_settings_now(section.as_deref());
         paint(&mut app);
     }
     let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);

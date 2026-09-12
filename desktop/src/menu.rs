@@ -60,10 +60,8 @@ pub enum Command {
     ReadOnly,
     CopyPath,
     Reveal,
-    /// Turns reopening the tabs at launch on or off.
-    ReopenTabs,
-    /// Turns asking before a changed file is reloaded on or off.
-    AskBeforeReloading,
+    /// Opens the settings dialog.
+    Settings,
     Help,
     ReportIssue,
     About,
@@ -168,8 +166,6 @@ pub struct State {
     pub tabs: usize,
     /// The colour of the tab in front.
     pub tab_color: Option<TabColor>,
-    pub reopen_tabs: bool,
-    pub ask_before_reloading: bool,
 }
 
 /// The menus, left to right. `system` is for the system's menu bar, which
@@ -193,6 +189,8 @@ pub fn titles(state: &State, system: bool) -> Vec<Title> {
                 Entry::System(System::Hide),
                 Entry::System(System::HideOthers),
                 Entry::System(System::ShowAll),
+                Entry::Separator,
+                item(Settings, "Settings…", "Cmd+,"),
                 Entry::Separator,
                 item(Quit, "Quit squint", "Cmd+Q"),
             ],
@@ -284,17 +282,16 @@ pub fn titles(state: &State, system: bool) -> Vec<Title> {
             Entry::Separator,
             item(CopyPath, "Copy File Path", "").when(state.has_file),
             item(Reveal, reveal_label(), "").when(state.has_file),
-            Entry::Separator,
-            Entry::Submenu {
-                label: "Settings".into(),
-                entries: vec![
-                    item(ReopenTabs, "Reopen Tabs at Launch", "").ticked(state.reopen_tabs),
-                    item(AskBeforeReloading, "Ask Before Reloading Changed Files", "")
-                        .ticked(state.ask_before_reloading),
-                ],
-            },
         ],
     });
+    if let Some(tools) = titles.last_mut() {
+        // macOS keeps Settings in the application menu, where it already is.
+        if !system {
+            tools
+                .entries
+                .extend([Entry::Separator, item(Settings, "Settings…", "Cmd+,")]);
+        }
+    }
 
     // Ctrl+Tab is not given to the system's menu: a menu that took the key
     // would report it outside winit, after the release of Ctrl that ends a
@@ -487,6 +484,7 @@ pub fn shortcut(code: KeyCode, modifiers: Modifiers) -> Option<Command> {
         KeyCode::Equal | KeyCode::NumpadAdd => ZoomIn,
         KeyCode::Minus | KeyCode::NumpadSubtract => ZoomOut,
         KeyCode::Digit0 => ActualSize,
+        KeyCode::Comma => Settings,
         _ => return None,
     })
 }
@@ -694,6 +692,7 @@ mod tests {
                         "-" => KeyCode::Minus,
                         "0" => KeyCode::Digit0,
                         "F3" => KeyCode::F3,
+                        "," => KeyCode::Comma,
                         other => panic!("no key called {other:?} in {spec:?}"),
                     })
                 }

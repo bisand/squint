@@ -28,6 +28,9 @@ pub struct FileDocument {
     /// Whether the grammar has been decided on, which waits for the grammars
     /// to load.
     syntax_decided: bool,
+    /// Whether this document is to be coloured at all: the settings say so,
+    /// and it is not too big for them.
+    syntax_allowed: bool,
     /// Runs asked for, kept so a paint does not allocate a vector per line.
     runs: Vec<Run>,
 }
@@ -41,6 +44,7 @@ impl FileDocument {
             highlight: None,
             syntax: None,
             syntax_decided: false,
+            syntax_allowed: true,
             runs: Vec::new(),
         })
     }
@@ -53,15 +57,30 @@ impl FileDocument {
             highlight: None,
             syntax: None,
             syntax_decided: true,
+            syntax_allowed: true,
             runs: Vec::new(),
         }
+    }
+
+    /// Whether syntect may colour this document. Turning it off drops the
+    /// colours; turning it on has the grammar decided on again, which is also
+    /// how a document takes up a theme chosen since it was parsed.
+    pub fn allow_syntax(&mut self, allowed: bool) {
+        self.syntax_allowed = allowed;
+        self.syntax = None;
+        self.syntax_decided = !allowed || self.path.is_none();
+    }
+
+    /// How many bytes the file is.
+    pub fn len(&self) -> u64 {
+        self.doc.len()
     }
 
     /// Decides on a grammar, once the grammars are loaded — starting their
     /// load if this file is worth it. Returns whether the text is coloured
     /// now, so the caller can say so.
     pub fn decide_syntax(&mut self) -> bool {
-        if self.syntax_decided {
+        if self.syntax_decided || !self.syntax_allowed {
             return false;
         }
         let head = self.head(8192);

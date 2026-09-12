@@ -1,0 +1,1312 @@
+//! The settings dialog: a modal over the window, a section down the left and
+//! the rows of that section to the right, with Save, Apply and Cancel along
+//! the bottom.
+//!
+//! The dialog edits a copy — the draft — and never the settings the window is
+//! running on. Save and Apply hand the draft back to [`App`](crate::app::App),
+//! which writes it to `settings.json` and applies it; Cancel drops it. The
+//! file is the settings' real home, and Edit the File… opens it in a tab, so
+//! this is an editor for a file that can be edited any other way too.
+//!
+//! Controls are read from the tree rather than reported by messages: a
+//! checkbox's message is a fn pointer and cannot say which checkbox it is, so
+//! every control this built is kept in [`Form::controls`] and read back
+//! whenever anything happens. What is on screen is the draft, always.
+
+use crate::app::Msg;
+use crate::fonts;
+use crate::settings::{
+    Appearance, BUILT_IN_THEMES, CustomTheme, Editor, Formatting, General, Highlighting,
+    IndentStyle, NewlineStyle, OpenIn, Settings,
+};
+use denise::{Color, Radius, Rect, Role, Size, Theme};
+use denise_text::TextStyle;
+use denise_ui::widgets::{Button, Checkbox, Label, List, Panel, Select, TextInput, open_select};
+use denise_ui::{NodeId, Ui};
+use std::path::PathBuf;
+
+/// What the dialog says to the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormMsg {
+    /// A section was picked from the list down the left.
+    Section(usize),
+    /// A checkbox was ticked: which one is read from the tree.
+    Ticked(bool),
+    /// A dropdown asked to be opened; the control it is.
+    OpenSelect(usize),
+    /// A row of the open dropdown was chosen.
+    Chose(usize),
+    /// Enter in a field: takes what is typed and shows it.
+    Submit,
+    Button(Action),
+}
+
+/// A button of the dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Save,
+    Apply,
+    Cancel,
+    /// Every setting back to what squint ships with.
+    Restore,
+    /// Opens `settings.json` in a tab.
+    EditFile,
+    NewTheme,
+    DuplicateTheme,
+    DeleteTheme,
+    /// Picks a font file for the text, or for the chrome.
+    ChooseTextFont,
+    ChooseUiFont,
+}
+
+/// What the window should do about what just happened in the dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Write the draft and apply it, and close.
+    Save,
+    /// Write the draft and apply it, and stay open.
+    Apply,
+    Close,
+    /// Write the draft, then open the settings file in a tab.
+    EditFile,
+    /// Pick a font file for the text, or for the chrome.
+    PickFont {
+        text: bool,
+    },
+}
+
+/// The sections, in the order the list down the left shows them.
+pub const SECTIONS: [&str; 5] = [
+    "General",
+    "Editor",
+    "Appearance",
+    "Highlighting",
+    "Formatting",
+];
+
+/// Which setting a control is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    ReopenTabs,
+    ReopenAtLine,
+    OpenIn,
+    RecentFiles,
+    WatchFiles,
+    WatchSeconds,
+    AskBeforeReloading,
+    LineNumbers,
+    TabWidth,
+    EditorConfigTabs,
+    ReadOnly,
+    ThemeChoice,
+    TextFont,
+    TextSize,
+    UiFont,
+    UiSize,
+    ThemeName,
+    ThemeDark,
+    /// One of the nine seed colours of the custom theme being edited.
+    ThemeSeed(usize),
+    HighlightOn,
+    SyntaxTheme,
+    MaxMb,
+    FormatEditorConfig,
+    Indent,
+    IndentSize,
+    Newline,
+    FinalNewline,
+}
+
+/// What kind of widget a control is, which is how it is read back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Kind {
+    Check,
+    /// The options, so a chosen row is the value it stands for.
+    Select(Vec<String>),
+    Text,
+}
+
+struct Control {
+    field: Field,
+    node: NodeId,
+    kind: Kind,
+}
+
+pub struct Form {
+    /// The settings as the dialog has them, which the window only sees on
+    /// Save or Apply.
+    draft: Settings,
+    /// What to go back to when Cancel undoes a preview.
+    theme_before: Theme,
+    section: usize,
+    /// The modal scene, dropped whole when the dialog closes.
+    scene: NodeId,
+    card: NodeId,
+    /// The scrolling page the rows are in.
+    page: NodeId,
+    sections: NodeId,
+    controls: Vec<Control>,
+    /// The control whose dropdown is open, while one is.
+    open: Option<usize>,
+    /// Where the next row goes, while a page is being built.
+    y: i32,
+    page_w: i32,
+    scale: f32,
+    /// The size the dialog was laid out for; a different one is rebuilt.
+    size: Size,
+    file: Option<PathBuf>,
+    /// The face the chrome is drawn in, which the dialog is drawn in too.
+    chrome: TextStyle,
+    /// The themes syntect has, read the first time they are shown: loading
+    /// the grammars to list them would hold up the dialog opening.
+    syntax_themes: Vec<String>,
+}
+
+/// The message a checkbox sends. A fn pointer cannot say which checkbox it
+/// is; the tree is read instead.
+fn ticked(on: bool) -> Msg {
+    Msg::Form(FormMsg::Ticked(on))
+}
+
+fn section_picked(index: usize) -> Msg {
+    Msg::Form(FormMsg::Section(index))
+}
+
+fn chose(row: usize) -> Msg {
+    Msg::Form(FormMsg::Chose(row))
+}
+
+impl Form {
+    /// Opens the dialog over the window, editing a copy of `settings`.
+    pub fn open(
+        ui: &mut Ui<Msg>,
+        settings: &Settings,
+        file: Option<PathBuf>,
+        scale: f32,
+        chrome: TextStyle,
+    ) -> Option<Self> {
+        let scene = ui.push_scene(150);
+        let mut form = Self {
+            draft: settings.clone(),
+            theme_before: *ui.theme(),
+            section: 0,
+            scene,
+            card: scene,
+            page: scene,
+            sections: scene,
+            controls: Vec::new(),
+            open: None,
+            y: 0,
+            page_w: 0,
+            scale,
+            size: ui.size(),
+            file,
+            chrome,
+            syntax_themes: Vec::new(),
+        };
+        form.build(ui)?;
+        Some(form)
+    }
+
+    /// Takes the dialog away, putting back the theme a preview changed.
+    pub fn close(self, ui: &mut Ui<Msg>, keep_theme: bool) {
+        ui.pop_scene();
+        if !keep_theme {
+            ui.set_theme(self.theme_before);
+        }
+    }
+
+    pub fn draft(&self) -> &Settings {
+        &self.draft
+    }
+
+    /// The draft, to be changed as a control would change it.
+    #[cfg(test)]
+    pub fn draft_mut(&mut self) -> &mut Settings {
+        &mut self.draft
+    }
+
+    /// Shows the section of that name, for a snapshot. Whether there is one.
+    pub fn show_section(&mut self, name: &str, ui: &mut Ui<Msg>) -> bool {
+        let Some(index) = SECTIONS.iter().position(|s| s.eq_ignore_ascii_case(name)) else {
+            return false;
+        };
+        self.handle(FormMsg::Section(index), ui);
+        true
+    }
+
+    /// Sets the font a file dialog picked, and shows it.
+    pub fn set_font(&mut self, ui: &mut Ui<Msg>, text: bool, name: String) {
+        if text {
+            self.draft.appearance.text_font = Some(name);
+        } else {
+            self.draft.appearance.ui_font = Some(name);
+        }
+        self.rebuild(ui);
+    }
+
+    /// Lays the dialog out again when the window has been resized.
+    pub fn resized(&mut self, ui: &mut Ui<Msg>) {
+        if ui.size() == self.size {
+            return;
+        }
+        self.read(ui);
+        self.size = ui.size();
+        let card = self.card;
+        ui.remove(card);
+        let _ = self.build(ui);
+    }
+
+    // ---- what happens ------------------------------------------------------
+
+    /// Acts on something the dialog said. What the window should do about it,
+    /// if anything.
+    pub fn handle(&mut self, msg: FormMsg, ui: &mut Ui<Msg>) -> Option<Outcome> {
+        match msg {
+            FormMsg::Section(index) => {
+                self.read(ui);
+                if index < SECTIONS.len() && index != self.section {
+                    self.section = index;
+                    self.rebuild(ui);
+                }
+                None
+            }
+            FormMsg::Ticked(_) => {
+                let was = self.shape();
+                self.read(ui);
+                self.preview(ui);
+                // A tick can decide what else the page shows — whether a
+                // custom theme is being edited, whether there is anything to
+                // colour — and the page is built again only when it does.
+                if self.shape() != was {
+                    self.rebuild(ui);
+                }
+                None
+            }
+            // Enter in a field: what was typed may be a theme's name or one of
+            // its colours, so the page is built again around it.
+            FormMsg::Submit => {
+                self.read(ui);
+                self.preview(ui);
+                self.rebuild(ui);
+                None
+            }
+            FormMsg::OpenSelect(index) => {
+                self.read(ui);
+                if let Some(control) = self.controls.get(index) {
+                    let node = control.node;
+                    if open_select(ui, node, chose).is_some() {
+                        self.open = Some(index);
+                    }
+                }
+                None
+            }
+            FormMsg::Chose(row) => {
+                ui.close_popup();
+                let index = self.open.take()?;
+                if let Some(control) = self.controls.get(index)
+                    && let Some(select) = ui.widget_mut::<Select<Msg>>(control.node)
+                {
+                    select.set_selected(Some(row));
+                }
+                let was = self.shape();
+                self.read(ui);
+                self.preview(ui);
+                if self.shape() != was {
+                    self.rebuild(ui);
+                }
+                None
+            }
+            FormMsg::Button(action) => self.button(action, ui),
+        }
+    }
+
+    fn button(&mut self, action: Action, ui: &mut Ui<Msg>) -> Option<Outcome> {
+        self.read(ui);
+        match action {
+            Action::Save => Some(Outcome::Save),
+            Action::Apply => Some(Outcome::Apply),
+            Action::Cancel => Some(Outcome::Close),
+            Action::EditFile => Some(Outcome::EditFile),
+            Action::ChooseTextFont => Some(Outcome::PickFont { text: true }),
+            Action::ChooseUiFont => Some(Outcome::PickFont { text: false }),
+            Action::Restore => {
+                let themes = std::mem::take(&mut self.draft.appearance.custom_themes);
+                self.draft = Settings::default();
+                // The themes somebody wrote are theirs, not a setting: putting
+                // the settings back must not throw their work away.
+                self.draft.appearance.custom_themes = themes;
+                self.preview(ui);
+                self.rebuild(ui);
+                None
+            }
+            Action::NewTheme => {
+                let theme = CustomTheme {
+                    name: self.fresh_theme_name("custom"),
+                    ..CustomTheme::default()
+                };
+                self.draft.appearance.theme = theme.name.clone();
+                self.draft.appearance.custom_themes.push(theme);
+                self.preview(ui);
+                self.rebuild(ui);
+                None
+            }
+            Action::DuplicateTheme => {
+                let from = self.draft.theme();
+                let name = self.fresh_theme_name(&format!("{} copy", from.name));
+                let seed = |role: Role| hex_of(from.color(role));
+                let theme = CustomTheme {
+                    name: name.clone(),
+                    dark: from.scheme == denise::ColorScheme::Dark,
+                    base: seed(Role::Base100),
+                    primary: seed(Role::Primary),
+                    secondary: seed(Role::Secondary),
+                    accent: seed(Role::Accent),
+                    neutral: seed(Role::Neutral),
+                    info: seed(Role::Info),
+                    success: seed(Role::Success),
+                    warning: seed(Role::Warning),
+                    error: seed(Role::Error),
+                };
+                self.draft.appearance.theme = name;
+                self.draft.appearance.custom_themes.push(theme);
+                self.preview(ui);
+                self.rebuild(ui);
+                None
+            }
+            Action::DeleteTheme => {
+                let name = self.draft.appearance.theme.clone();
+                self.draft
+                    .appearance
+                    .custom_themes
+                    .retain(|t| t.name != name);
+                if !self.draft.theme_names().contains(&name) {
+                    self.draft.appearance.theme = "dark".into();
+                }
+                self.preview(ui);
+                self.rebuild(ui);
+                None
+            }
+        }
+    }
+
+    /// A name no theme has yet: `custom`, then `custom 2`.
+    fn fresh_theme_name(&self, from: &str) -> String {
+        let taken = self.draft.theme_names();
+        if !taken.iter().any(|n| n == from) {
+            return from.to_string();
+        }
+        (2..)
+            .map(|n| format!("{from} {n}"))
+            .find(|name| !taken.iter().any(|n| n == name))
+            .unwrap_or_else(|| from.to_string())
+    }
+
+    /// The theme as the draft has it, so an edit is seen while it is made.
+    fn preview(&mut self, ui: &mut Ui<Msg>) {
+        let theme = self.draft.theme().scaled(self.scale);
+        if *ui.theme() != theme {
+            ui.set_theme(theme);
+        }
+    }
+
+    /// What decides which rows the page has: the section, whether a theme of
+    /// the file's own is being edited, and whether there is any highlighting
+    /// to set. A change to one of these is a page built again.
+    fn shape(&self) -> (usize, Option<usize>, bool) {
+        (
+            self.section,
+            self.editing_theme(),
+            self.draft.highlighting.enabled,
+        )
+    }
+
+    /// The custom theme being edited, if the chosen one is custom.
+    fn editing_theme(&self) -> Option<usize> {
+        let name = &self.draft.appearance.theme;
+        self.draft
+            .appearance
+            .custom_themes
+            .iter()
+            .position(|t| &t.name == name)
+    }
+
+    // ---- reading the controls ----------------------------------------------
+
+    /// Takes what every control on the page says into the draft.
+    fn read(&mut self, ui: &Ui<Msg>) {
+        let mut draft = std::mem::take(&mut self.draft);
+        for control in &self.controls {
+            match &control.kind {
+                Kind::Check => {
+                    let Some(on) = ui
+                        .widget::<Checkbox<Msg>>(control.node)
+                        .map(Checkbox::checked)
+                    else {
+                        continue;
+                    };
+                    set_check(&mut draft, control.field, on);
+                }
+                Kind::Select(options) => {
+                    let Some(chosen) = ui
+                        .widget::<Select<Msg>>(control.node)
+                        .and_then(Select::selected)
+                        .and_then(|i| options.get(i))
+                    else {
+                        continue;
+                    };
+                    set_choice(&mut draft, control.field, chosen);
+                }
+                Kind::Text => {
+                    let Some(text) = ui
+                        .widget::<TextInput<Msg>>(control.node)
+                        .map(|field| field.text().to_string())
+                    else {
+                        continue;
+                    };
+                    set_text(&mut draft, control.field, text);
+                }
+            }
+        }
+        self.draft = draft.sane();
+    }
+
+    // ---- building it -------------------------------------------------------
+
+    /// The card, the list of sections, the buttons and the first page.
+    fn build(&mut self, ui: &mut Ui<Msg>) -> Option<()> {
+        let s = |v: i32| (v as f32 * self.scale + 0.5) as i32;
+        let px = |v: f32| (v * self.scale + 0.5) as u16;
+        let size = ui.size();
+        self.size = size;
+        let (w, h) = (size.width as i32, size.height as i32);
+        let card_w = s(820).min(w - s(40)).max(s(320));
+        let card_h = s(560).min(h - s(40)).max(s(240));
+        let card = ui.add(
+            self.scene,
+            Panel::default().with_radius(Radius::Box).backdrop(),
+            Rect::new((w - card_w) / 2, (h - card_h) / 2, card_w, card_h),
+        )?;
+        self.card = card;
+        let pad = s(16);
+        let title = Label::new("Settings").with_size(px(17.0));
+        ui.add(card, title, Rect::new(pad, pad, card_w - pad * 2, s(22)))?;
+        let where_it_lives = match &self.file {
+            Some(file) => format!("kept in {}", file.display()),
+            None => "not written anywhere: this squint keeps nothing".to_string(),
+        };
+        ui.add(
+            card,
+            Label::new(where_it_lives)
+                .with_size(px(10.0))
+                .with_role(Role::Neutral),
+            Rect::new(pad, pad + s(22), card_w - pad * 2, s(14)),
+        )?;
+
+        let top = pad + s(44);
+        let buttons_h = s(44);
+        let body_h = card_h - top - buttons_h - pad;
+        let list_w = s(150);
+        let list = List::new(SECTIONS, section_picked)
+            .with_selected(Some(self.section))
+            .with_row_height(s(28))
+            .with_style(TextStyle {
+                size_px: px(12.0),
+                ..self.chrome
+            })
+            .with_role(Role::Primary);
+        self.sections = ui.add(card, list, Rect::new(pad, top, list_w, body_h))?;
+
+        let page_x = pad + list_w + s(12);
+        self.page_w = card_w - page_x - pad;
+        let page = ui.add(
+            card,
+            Panel::bare(),
+            Rect::new(page_x, top, self.page_w, body_h),
+        )?;
+        ui.set_scrollable(page, true);
+        self.page = page;
+
+        // The buttons: what closes the dialog on the right, where a dialog's
+        // buttons are, and what does not on the left.
+        let by = card_h - buttons_h + s(4);
+        let bw = s(88);
+        let bh = s(28);
+        let small = TextStyle {
+            size_px: px(12.0),
+            ..self.chrome
+        };
+        let mut left = pad;
+        for (label, action, width) in [
+            ("Restore Defaults", Action::Restore, s(128)),
+            ("Edit the File…", Action::EditFile, s(110)),
+        ] {
+            let button = Button::new(label, Msg::Form(FormMsg::Button(action)))
+                .with_style(small)
+                .with_role(Role::Neutral);
+            ui.add(card, button, Rect::new(left, by, width, bh))?;
+            left += width + s(8);
+        }
+        let mut right = card_w - pad - bw;
+        for (label, action, role) in [
+            ("Save", Action::Save, Role::Primary),
+            ("Apply", Action::Apply, Role::Neutral),
+            ("Cancel", Action::Cancel, Role::Neutral),
+        ] {
+            let button = Button::new(label, Msg::Form(FormMsg::Button(action)))
+                .with_style(small)
+                .with_role(role);
+            ui.add(card, button, Rect::new(right, by, bw, bh))?;
+            right -= bw + s(8);
+        }
+
+        self.fill_page(ui);
+        ui.focus(Some(self.sections));
+        Some(())
+    }
+
+    /// Builds the page again: the rows of the section, as the draft is now.
+    /// Whatever had the keyboard has it again, if its row is still there.
+    fn rebuild(&mut self, ui: &mut Ui<Msg>) {
+        let Some(bounds) = ui.layout(self.page) else {
+            return;
+        };
+        let had_focus = self
+            .controls
+            .iter()
+            .find(|c| Some(c.node) == ui.focused())
+            .map(|c| c.field);
+        ui.remove(self.page);
+        self.controls.clear();
+        let Some(page) = ui.add(self.card, Panel::bare(), bounds) else {
+            return;
+        };
+        ui.set_scrollable(page, true);
+        self.page = page;
+        if let Some(list) = ui.widget_mut::<List<Msg>>(self.sections) {
+            list.set_selected(Some(self.section));
+        }
+        self.fill_page(ui);
+        if let Some(field) = had_focus
+            && let Some(control) = self.controls.iter().find(|c| c.field == field)
+        {
+            let node = control.node;
+            ui.focus(Some(node));
+        }
+    }
+
+    fn fill_page(&mut self, ui: &mut Ui<Msg>) {
+        self.y = 0;
+        match self.section {
+            0 => self.general_page(ui),
+            1 => self.editor_page(ui),
+            2 => self.appearance_page(ui),
+            3 => self.highlighting_page(ui),
+            _ => self.formatting_page(ui),
+        }
+    }
+
+    fn general_page(&mut self, ui: &mut Ui<Msg>) {
+        let General {
+            reopen_tabs,
+            reopen_at_line,
+            open_in,
+            recent_files,
+            watch_files,
+            watch_seconds,
+            ask_before_reloading,
+        } = self.draft.general.clone();
+        self.heading(ui, "Opening");
+        self.check(
+            ui,
+            Field::ReopenTabs,
+            "Reopen tabs at launch",
+            "The tabs open when squint closes open again when it starts.",
+            reopen_tabs,
+        );
+        self.check(
+            ui,
+            Field::ReopenAtLine,
+            "Reopen at the same line",
+            "A tab comes back where it was, not at the top.",
+            reopen_at_line,
+        );
+        let options: Vec<String> = OpenIn::ALL.iter().map(|o| o.label().to_string()).collect();
+        let chosen = OpenIn::ALL.iter().position(|o| *o == open_in);
+        self.select(
+            ui,
+            Field::OpenIn,
+            "A file opens in",
+            "squint is one window with a row of tabs: no file opens a second window.",
+            options,
+            chosen,
+        );
+        self.text(
+            ui,
+            Field::RecentFiles,
+            "Recent files kept",
+            "How many File ▸ Open Recent lists. None keeps no list at all.",
+            recent_files.to_string(),
+        );
+
+        self.heading(ui, "Files changed by something else");
+        self.check(
+            ui,
+            Field::WatchFiles,
+            "Watch the tabs' files",
+            "Each tab's file is looked at now and then, in case something else wrote it.",
+            watch_files,
+        );
+        self.text(
+            ui,
+            Field::WatchSeconds,
+            "Looked at every (seconds)",
+            "Between 1 and 60.",
+            watch_seconds.to_string(),
+        );
+        self.check(
+            ui,
+            Field::AskBeforeReloading,
+            "Ask before reloading",
+            "Off, a tab with no unsaved changes reloads quietly; one with changes still asks.",
+            ask_before_reloading,
+        );
+    }
+
+    fn editor_page(&mut self, ui: &mut Ui<Msg>) {
+        let Editor {
+            line_numbers,
+            tab_width,
+            follow_editorconfig,
+            read_only,
+        } = self.draft.editor.clone();
+        self.heading(ui, "The text");
+        self.check(
+            ui,
+            Field::LineNumbers,
+            "Line numbers",
+            "The gutter down the left. View ▸ Line Numbers is the same setting.",
+            line_numbers,
+        );
+        self.check(
+            ui,
+            Field::EditorConfigTabs,
+            "Tab stops from .editorconfig",
+            "The project decides: tab_width, or a numeric indent_size.",
+            follow_editorconfig,
+        );
+        self.text(
+            ui,
+            Field::TabWidth,
+            "Tab stops every",
+            "Columns, where no .editorconfig decides it. Between 1 and 16.",
+            tab_width.to_string(),
+        );
+        self.check(
+            ui,
+            Field::ReadOnly,
+            "Open files read only",
+            "A tab can be made editable again from Tools ▸ Read Only.",
+            read_only,
+        );
+    }
+
+    fn appearance_page(&mut self, ui: &mut Ui<Msg>) {
+        let Appearance {
+            theme,
+            text_font,
+            text_size,
+            ui_font,
+            ui_size,
+            ..
+        } = self.draft.appearance.clone();
+        self.heading(ui, "Theme");
+        let names = self.draft.theme_names();
+        let chosen = names.iter().position(|n| *n == theme);
+        self.select(
+            ui,
+            Field::ThemeChoice,
+            "Theme",
+            "Changing it here shows it at once; Cancel puts it back.",
+            names,
+            chosen,
+        );
+        // A built-in theme cannot be edited or deleted; duplicating it is how
+        // one is started from.
+        let custom = !BUILT_IN_THEMES.contains(&theme.as_str());
+        self.buttons(
+            ui,
+            &[
+                ("New Theme", Action::NewTheme, true),
+                ("Duplicate", Action::DuplicateTheme, true),
+                ("Delete", Action::DeleteTheme, custom),
+            ],
+        );
+
+        if let Some(index) = self.editing_theme() {
+            let editing = self.draft.appearance.custom_themes[index].clone();
+            self.heading(ui, "This theme");
+            self.text(
+                ui,
+                Field::ThemeName,
+                "Name",
+                "What the theme is called, here and in the settings file.",
+                editing.name.clone(),
+            );
+            self.check(
+                ui,
+                Field::ThemeDark,
+                "Dark",
+                "Whether the surfaces DeniseUI derives step darker or lighter.",
+                editing.dark,
+            );
+            for (n, name) in CustomTheme::SEEDS.iter().enumerate() {
+                let hint = if n == 0 {
+                    "The nine seed colours, as #RRGGBB. Enter shows what one does."
+                } else {
+                    ""
+                };
+                self.text(
+                    ui,
+                    Field::ThemeSeed(n),
+                    name,
+                    hint,
+                    editing.seed(n).to_string(),
+                );
+            }
+        }
+
+        self.heading(ui, "Faces");
+        let mono = self.font_options(fonts::MONO, text_font.as_deref());
+        let chosen = font_chosen(&mono, text_font.as_deref());
+        self.select(
+            ui,
+            Field::TextFont,
+            "The text",
+            "The faces squint looks for that this machine has. Choose a File… takes any TrueType file.",
+            mono,
+            Some(chosen),
+        );
+        self.buttons(ui, &[("Choose a File…", Action::ChooseTextFont, true)]);
+        self.text(
+            ui,
+            Field::TextSize,
+            "Text size",
+            "Logical pixels, and where ⌘0 comes back to. Between 6 and 64.",
+            text_size.to_string(),
+        );
+        let chrome = self.font_options(fonts::UI, ui_font.as_deref());
+        let chosen = font_chosen(&chrome, ui_font.as_deref());
+        self.select(
+            ui,
+            Field::UiFont,
+            "Menus, tabs and status",
+            "The face the chrome is drawn in.",
+            chrome,
+            Some(chosen),
+        );
+        self.buttons(ui, &[("Choose a File…", Action::ChooseUiFont, true)]);
+        self.text(
+            ui,
+            Field::UiSize,
+            "Chrome size",
+            "Logical pixels, between 8 and 32.",
+            ui_size.to_string(),
+        );
+    }
+
+    fn highlighting_page(&mut self, ui: &mut Ui<Msg>) {
+        let Highlighting {
+            enabled,
+            theme,
+            max_mb,
+        } = self.draft.highlighting.clone();
+        self.heading(ui, "Syntax highlighting");
+        self.check(
+            ui,
+            Field::HighlightOn,
+            "Colour the text",
+            "syntect's grammars, loaded on a thread and only for a file that has one.",
+            enabled,
+        );
+        if enabled {
+            if self.syntax_themes.is_empty() {
+                self.syntax_themes = squint_core::syntax::theme_names();
+            }
+            let names = self.syntax_themes.clone();
+            let chosen = names.iter().position(|n| *n == theme);
+            self.select(
+                ui,
+                Field::SyntaxTheme,
+                "Colours",
+                "One of the themes syntect ships. It takes effect on Apply.",
+                names,
+                chosen,
+            );
+            self.text(
+                ui,
+                Field::MaxMb,
+                "Only files up to (MB)",
+                "A bigger file is left uncoloured: the grammars are not worth loading for it.",
+                max_mb.to_string(),
+            );
+        }
+    }
+
+    fn formatting_page(&mut self, ui: &mut Ui<Msg>) {
+        let Formatting {
+            follow_editorconfig,
+            indent,
+            indent_size,
+            newline,
+            final_newline,
+        } = self.draft.formatting.clone();
+        self.heading(ui, "How ⇧⌘F lays out what it writes");
+        self.check(
+            ui,
+            Field::FormatEditorConfig,
+            "Follow .editorconfig",
+            "The source file's project decides, where there is one; the rows below are what is used when there is not.",
+            follow_editorconfig,
+        );
+        let options: Vec<String> = IndentStyle::ALL
+            .iter()
+            .map(|i| i.label().to_string())
+            .collect();
+        let chosen = IndentStyle::ALL.iter().position(|i| *i == indent);
+        self.select(ui, Field::Indent, "Indent with", "", options, chosen);
+        self.text(
+            ui,
+            Field::IndentSize,
+            "One level is",
+            "Spaces per level, ignored when indenting with tabs. Between 1 and 16.",
+            indent_size.to_string(),
+        );
+        let options: Vec<String> = NewlineStyle::ALL
+            .iter()
+            .map(|n| n.label().to_string())
+            .collect();
+        let chosen = NewlineStyle::ALL.iter().position(|n| *n == newline);
+        self.select(ui, Field::Newline, "Line breaks", "", options, chosen);
+        self.check(
+            ui,
+            Field::FinalNewline,
+            "End with a line break",
+            "",
+            final_newline,
+        );
+    }
+
+    /// The faces offered for one kind of text: none, the ones squint looks
+    /// for that this machine has, and whatever the settings already name.
+    fn font_options(&self, preferred: &[&str], current: Option<&str>) -> Vec<String> {
+        let mut options = vec![AUTOMATIC.to_string()];
+        options.extend(fonts::choices(preferred));
+        if let Some(current) = current
+            && !options.iter().any(|o| o == current)
+        {
+            options.push(current.to_string());
+        }
+        options
+    }
+
+    // ---- the rows ----------------------------------------------------------
+
+    fn s(&self, v: i32) -> i32 {
+        (v as f32 * self.scale + 0.5) as i32
+    }
+
+    fn px(&self, v: f32) -> u16 {
+        (v * self.scale + 0.5) as u16
+    }
+
+    fn heading(&mut self, ui: &mut Ui<Msg>, text: &str) {
+        if self.y > 0 {
+            self.y += self.s(10);
+        }
+        let h = self.s(18);
+        ui.add(
+            self.page,
+            Label::new(text)
+                .with_size(self.px(12.0))
+                .with_role(Role::Accent),
+            Rect::new(0, self.y, self.page_w, h),
+        );
+        self.y += h + self.s(4);
+    }
+
+    /// A row: its name on the left, a line about it underneath, and the
+    /// control on the right. Returns where the control goes.
+    fn row(&mut self, ui: &mut Ui<Msg>, label: &str, hint: &str) -> Rect {
+        let label_w = (self.page_w * 46 / 100).max(self.s(120));
+        let control_w = (self.page_w - label_w - self.s(12)).max(self.s(100));
+        let line = self.s(20);
+        ui.add(
+            self.page,
+            Label::new(label).with_size(self.px(12.0)),
+            Rect::new(0, self.y, label_w, line),
+        );
+        let mut height = line;
+        if !hint.is_empty() {
+            // The whole width: a label does not wrap, so a line about a
+            // setting has the row to itself, under the control.
+            let hint_h = self.s(28);
+            ui.add(
+                self.page,
+                Label::new(hint)
+                    .with_size(self.px(10.0))
+                    .with_role(Role::Neutral),
+                Rect::new(0, self.y + line, self.page_w, hint_h),
+            );
+            height += hint_h - self.s(6);
+        }
+        let control = Rect::new(label_w + self.s(12), self.y, control_w, self.s(26));
+        self.y += height + self.s(8);
+        control
+    }
+
+    fn check(&mut self, ui: &mut Ui<Msg>, field: Field, label: &str, hint: &str, on: bool) {
+        let at = self.row(ui, label, hint);
+        let widget = Checkbox::new("", ticked)
+            .with_checked(on)
+            .with_size(self.px(13.0));
+        if let Some(node) = ui.add(self.page, widget, at) {
+            self.controls.push(Control {
+                field,
+                node,
+                kind: Kind::Check,
+            });
+        }
+    }
+
+    fn select(
+        &mut self,
+        ui: &mut Ui<Msg>,
+        field: Field,
+        label: &str,
+        hint: &str,
+        options: Vec<String>,
+        chosen: Option<usize>,
+    ) {
+        let at = self.row(ui, label, hint);
+        let index = self.controls.len();
+        let widget = Select::new(options.clone(), Msg::Form(FormMsg::OpenSelect(index)))
+            .with_selected(chosen)
+            .with_style(TextStyle {
+                size_px: self.px(12.0),
+                ..self.chrome
+            });
+        if let Some(node) = ui.add(self.page, widget, at) {
+            self.controls.push(Control {
+                field,
+                node,
+                kind: Kind::Select(options),
+            });
+        }
+    }
+
+    fn text(&mut self, ui: &mut Ui<Msg>, field: Field, label: &str, hint: &str, value: String) {
+        let at = self.row(ui, label, hint);
+        let mut widget = TextInput::new()
+            .with_submit(Msg::Form(FormMsg::Submit))
+            .with_max_chars(120)
+            .with_size(self.px(12.0));
+        widget.set_text(value);
+        if let Some(node) = ui.add(self.page, widget, at) {
+            self.controls.push(Control {
+                field,
+                node,
+                kind: Kind::Text,
+            });
+        }
+    }
+
+    /// A row of buttons across the control column, each saying whether it can
+    /// be pressed.
+    fn buttons(&mut self, ui: &mut Ui<Msg>, buttons: &[(&str, Action, bool)]) {
+        let at = self.row(ui, "", "");
+        let gap = self.s(6);
+        let width = ((at.width - gap * (buttons.len() as i32 - 1)) / buttons.len() as i32).max(1);
+        for (n, (label, action, enabled)) in buttons.iter().enumerate() {
+            let button = Button::new(*label, Msg::Form(FormMsg::Button(*action)))
+                .with_size(self.px(11.0))
+                .with_role(Role::Neutral);
+            let rect = Rect::new(at.x + n as i32 * (width + gap), at.y, width, self.s(24));
+            if let Some(node) = ui.add(self.page, button, rect) {
+                ui.set_enabled(node, *enabled);
+            }
+        }
+    }
+}
+
+/// What the font dropdown calls no choice at all.
+const AUTOMATIC: &str = "automatic";
+
+fn font_chosen(options: &[String], current: Option<&str>) -> usize {
+    current
+        .and_then(|name| options.iter().position(|o| o == name))
+        .unwrap_or(0)
+}
+
+fn hex_of(color: Color) -> String {
+    format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
+}
+
+fn set_check(settings: &mut Settings, field: Field, on: bool) {
+    match field {
+        Field::ReopenTabs => settings.general.reopen_tabs = on,
+        Field::ReopenAtLine => settings.general.reopen_at_line = on,
+        Field::WatchFiles => settings.general.watch_files = on,
+        Field::AskBeforeReloading => settings.general.ask_before_reloading = on,
+        Field::LineNumbers => settings.editor.line_numbers = on,
+        Field::EditorConfigTabs => settings.editor.follow_editorconfig = on,
+        Field::ReadOnly => settings.editor.read_only = on,
+        Field::ThemeDark => {
+            if let Some(theme) = editing_mut(settings) {
+                theme.dark = on;
+            }
+        }
+        Field::HighlightOn => settings.highlighting.enabled = on,
+        Field::FormatEditorConfig => settings.formatting.follow_editorconfig = on,
+        Field::FinalNewline => settings.formatting.final_newline = on,
+        _ => {}
+    }
+}
+
+fn set_choice(settings: &mut Settings, field: Field, chosen: &str) {
+    match field {
+        Field::OpenIn => {
+            if let Some(value) = OpenIn::ALL.iter().find(|o| o.label() == chosen) {
+                settings.general.open_in = *value;
+            }
+        }
+        Field::ThemeChoice => settings.appearance.theme = chosen.to_string(),
+        Field::TextFont => {
+            settings.appearance.text_font = (chosen != AUTOMATIC).then(|| chosen.to_string());
+        }
+        Field::UiFont => {
+            settings.appearance.ui_font = (chosen != AUTOMATIC).then(|| chosen.to_string());
+        }
+        Field::SyntaxTheme => settings.highlighting.theme = chosen.to_string(),
+        Field::Indent => {
+            if let Some(value) = IndentStyle::ALL.iter().find(|i| i.label() == chosen) {
+                settings.formatting.indent = *value;
+            }
+        }
+        Field::Newline => {
+            if let Some(value) = NewlineStyle::ALL.iter().find(|n| n.label() == chosen) {
+                settings.formatting.newline = *value;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn set_text(settings: &mut Settings, field: Field, text: String) {
+    let number = |fallback: u64| text.trim().parse::<u64>().unwrap_or(fallback);
+    match field {
+        Field::RecentFiles => {
+            settings.general.recent_files = number(settings.general.recent_files as u64) as usize;
+        }
+        Field::WatchSeconds => {
+            settings.general.watch_seconds = number(settings.general.watch_seconds as u64) as u32;
+        }
+        Field::TabWidth => {
+            settings.editor.tab_width = number(settings.editor.tab_width as u64).min(255) as u8;
+        }
+        Field::TextSize => {
+            settings.appearance.text_size =
+                number(settings.appearance.text_size as u64).min(1000) as u16;
+        }
+        Field::UiSize => {
+            settings.appearance.ui_size =
+                number(settings.appearance.ui_size as u64).min(1000) as u16;
+        }
+        Field::MaxMb => settings.highlighting.max_mb = number(settings.highlighting.max_mb),
+        Field::IndentSize => {
+            settings.formatting.indent_size =
+                number(settings.formatting.indent_size as u64).min(255) as u8;
+        }
+        Field::ThemeName => {
+            let name = text.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            let was = settings.appearance.theme.clone();
+            if let Some(theme) = editing_mut(settings) {
+                theme.name = name.clone();
+            }
+            if settings.appearance.theme == was {
+                settings.appearance.theme = name;
+            }
+        }
+        Field::ThemeSeed(n) => {
+            if let Some(theme) = editing_mut(settings) {
+                theme.set_seed(n, text.trim().to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The custom theme the appearance page is editing.
+fn editing_mut(settings: &mut Settings) -> Option<&mut CustomTheme> {
+    let name = settings.appearance.theme.clone();
+    settings
+        .appearance
+        .custom_themes
+        .iter_mut()
+        .find(|t| t.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use denise::{Size, theme};
+
+    fn form(ui: &mut Ui<Msg>, settings: &Settings) -> Form {
+        Form::open(ui, settings, None, 1.0, TextStyle::built_in(13)).expect("the dialog")
+    }
+
+    fn tree() -> Ui<Msg> {
+        Ui::new(Size::new(900, 600), theme::DARK)
+    }
+
+    /// Every section has rows, and nothing typed is lost walking between them.
+    #[test]
+    fn every_section_has_rows_and_the_draft_survives_them() {
+        let mut ui = tree();
+        let mut form = form(&mut ui, &Settings::default());
+        for name in SECTIONS {
+            assert!(form.show_section(name, &mut ui), "{name}");
+            assert!(!form.controls.is_empty(), "{name} has no rows");
+        }
+        assert!(!form.show_section("Nothing Like It", &mut ui));
+        assert_eq!(form.draft(), &Settings::default());
+    }
+
+    /// A control changed in the tree is the draft changed: the dialog reads
+    /// what is on screen rather than being told about it.
+    #[test]
+    fn a_checkbox_ticked_is_the_setting_changed() {
+        let mut ui = tree();
+        let mut form = form(&mut ui, &Settings::default());
+        let node = form
+            .controls
+            .iter()
+            .find(|c| c.field == Field::ReopenTabs)
+            .expect("the row")
+            .node;
+        ui.widget_mut::<Checkbox<Msg>>(node)
+            .expect("checkbox")
+            .set_checked(false);
+        assert_eq!(form.handle(FormMsg::Ticked(false), &mut ui), None);
+        assert!(!form.draft().general.reopen_tabs);
+    }
+
+    /// A new theme is a theme of the file's own, chosen, and editable where a
+    /// built-in one is not.
+    #[test]
+    fn a_new_theme_is_made_chosen_and_editable() {
+        let mut ui = tree();
+        let mut form = form(&mut ui, &Settings::default());
+        form.show_section("Appearance", &mut ui);
+        assert_eq!(form.editing_theme(), None, "dark is built in");
+        form.handle(FormMsg::Button(Action::NewTheme), &mut ui);
+        assert_eq!(form.draft().appearance.theme, "custom");
+        assert_eq!(form.editing_theme(), Some(0));
+        form.handle(FormMsg::Button(Action::NewTheme), &mut ui);
+        assert_eq!(
+            form.draft().appearance.theme,
+            "custom 2",
+            "a name of its own"
+        );
+        assert_eq!(form.draft().appearance.custom_themes.len(), 2);
+        form.handle(FormMsg::Button(Action::DeleteTheme), &mut ui);
+        assert_eq!(form.draft().appearance.custom_themes.len(), 1);
+        assert_eq!(
+            form.draft().appearance.theme,
+            "dark",
+            "back to a built-in one"
+        );
+    }
+
+    /// A dropdown opens over the dialog, and what is chosen in it is the
+    /// setting it is for.
+    #[test]
+    fn a_dropdown_opens_and_what_is_chosen_is_the_setting() {
+        let mut ui = tree();
+        let mut form = form(&mut ui, &Settings::default());
+        form.show_section("Formatting", &mut ui);
+        let at = form
+            .controls
+            .iter()
+            .position(|c| c.field == Field::Newline)
+            .expect("the row");
+        form.handle(FormMsg::OpenSelect(at), &mut ui);
+        assert!(ui.popup_open(), "the list is open over the dialog");
+        assert_eq!(form.open, Some(at));
+
+        let crlf = NewlineStyle::ALL
+            .iter()
+            .position(|n| *n == NewlineStyle::CrLf)
+            .expect("a row for it");
+        form.handle(FormMsg::Chose(crlf), &mut ui);
+        assert!(!ui.popup_open(), "choosing closes it");
+        assert_eq!(form.draft().formatting.newline, NewlineStyle::CrLf);
+    }
+
+    /// The buttons say what the window is to do.
+    #[test]
+    fn the_buttons_ask_the_window_for_what_they_say() {
+        let mut ui = tree();
+        let mut form = form(&mut ui, &Settings::default());
+        for (action, outcome) in [
+            (Action::Save, Some(Outcome::Save)),
+            (Action::Apply, Some(Outcome::Apply)),
+            (Action::Cancel, Some(Outcome::Close)),
+            (Action::EditFile, Some(Outcome::EditFile)),
+            (Action::Restore, None),
+        ] {
+            assert_eq!(form.handle(FormMsg::Button(action), &mut ui), outcome);
+        }
+    }
+
+    #[test]
+    fn a_colour_is_written_the_way_the_file_holds_it() {
+        assert_eq!(hex_of(Color::rgb(30, 30, 46)), "#1E1E2E");
+    }
+
+    /// Every kind of control writes what it says into the draft.
+    #[test]
+    fn a_control_writes_the_setting_it_is_for() {
+        let mut settings = Settings::default();
+        set_check(&mut settings, Field::ReopenTabs, false);
+        assert!(!settings.general.reopen_tabs);
+        set_choice(&mut settings, Field::Indent, "tabs");
+        assert_eq!(settings.formatting.indent, IndentStyle::Tabs);
+        set_text(&mut settings, Field::TabWidth, "8".into());
+        assert_eq!(settings.editor.tab_width, 8);
+        set_text(&mut settings, Field::TabWidth, "not a number".into());
+        assert_eq!(settings.editor.tab_width, 8, "kept, not zeroed");
+        set_choice(&mut settings, Field::TextFont, AUTOMATIC);
+        assert_eq!(settings.appearance.text_font, None);
+        set_choice(&mut settings, Field::TextFont, "Menlo");
+        assert_eq!(settings.appearance.text_font.as_deref(), Some("Menlo"));
+    }
+
+    /// Renaming the theme being edited keeps it the chosen one.
+    #[test]
+    fn renaming_the_theme_being_edited_keeps_it_chosen() {
+        let mut settings = Settings::default();
+        settings.appearance.custom_themes.push(CustomTheme {
+            name: "custom".into(),
+            ..CustomTheme::default()
+        });
+        settings.appearance.theme = "custom".into();
+        set_text(&mut settings, Field::ThemeName, "midnight".into());
+        assert_eq!(settings.appearance.theme, "midnight");
+        assert_eq!(settings.appearance.custom_themes[0].name, "midnight");
+        assert_eq!(settings.theme().name, "midnight");
+    }
+}

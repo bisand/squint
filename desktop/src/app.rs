@@ -26,14 +26,15 @@ use crate::menu::{self, Command, State};
 use crate::native_menu::NativeMenu;
 use crate::recent::Recent;
 use crate::session::{self, SavedTab, Session, TabColor};
-use crate::settings::{self, Settings};
+use crate::settings::{self, OpenIn, Settings};
+use crate::settings_form::{Form, FormMsg, Outcome};
 use crate::stamp::Stamp;
 use crate::switcher::{Switcher, TabId};
 use denise::{
     BufferAge, Color, DamageTracker, ElementState, Frame, InputEvent, KeyCode, Modifiers, Pen,
-    Point, Rect, Size, theme,
+    Point, Rect, Size,
 };
-use denise_text::TextStyle;
+use denise_text::{FontId, TextStyle};
 use denise_ui::widgets::{
     ClipboardRequest, Label, MenuBar, MenuEvent, TabEvent, Tabs, TextArea, TextDocument, TextInput,
     open_menu, open_menu_at, shortcut, tab_rect,
@@ -44,6 +45,7 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, Messag
 use squint_core::editorconfig::{self, Properties};
 use squint_core::format::{self, Format, Kind, Style};
 use squint_core::{Find, FindStep};
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
@@ -62,12 +64,8 @@ const FORMAT_SLICE: usize = 4 * 1024 * 1024;
 /// How long one frame may spend walking the file, indexing or finding.
 const SLICE_TIME: Duration = Duration::from_millis(6);
 
-/// How often the tabs' files are looked at for changes made by something else.
-const CHECK_FILES: Duration = Duration::from_secs(2);
-
-/// The text's size in logical pixels, and the sizes Zoom In and Zoom Out step
-/// through.
-const TEXT_SIZE: u16 = 13;
+/// The sizes Zoom In and Zoom Out step through. Zoom starts from the size the
+/// settings give, and ⌘0 comes back to it.
 const TEXT_SIZES: &[u16] = &[8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 32, 40, 48];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +82,8 @@ pub enum Msg {
     Tab(TabEvent),
     /// Enter in the field renaming a tab.
     Renamed,
+    /// Something happened in the settings dialog.
+    Form(FormMsg),
 }
 
 /// Where the menus are.
@@ -237,6 +237,15 @@ pub struct App {
     #[cfg(target_os = "macos")]
     shown: State,
     memory: Remembered,
+    /// The settings dialog, while it is open.
+    form: Option<Form>,
+    /// Where the settings are kept, for the dialog to say and to open.
+    settings_file: Option<PathBuf>,
+    /// The faces added to the tree, by the file they came from: a face asked
+    /// for twice is added once.
+    faces: HashMap<String, FontId>,
+    /// How often the tabs' files are looked at, from the settings.
+    watch: Duration,
     switcher: Switcher,
     next_id: TabId,
     rename: Option<Rename>,
@@ -252,11 +261,17 @@ pub struct App {
     /// The text area being marked with the query in the find field, and the
     /// query, so it is only reached — and so repainted — when either changes.
     highlighted: Option<(NodeId, String)>,
-    /// The face the tabs and their rename field are drawn in.
+    /// The face the menus, tabs and status line are drawn in.
+    chrome: TextStyle,
+    /// The same face, a size down, for the tabs and their rename field.
     small: TextStyle,
     /// The face the text is drawn in, and its size in logical pixels.
     mono: TextStyle,
     text_size: u16,
+    /// How tall the menu bar and the row of tabs are, so the text below them
+    /// can be put back when a face changes.
+    bar_h: i32,
+    strip_h: i32,
     gutter: bool,
     scale: f32,
     title: String,
@@ -287,34 +302,47 @@ impl App {
     ) -> Self {
         let px = |v: f32| (v * scale + 0.5) as u16;
         let s = |v: i32| (v as f32 * scale + 0.5) as i32;
-        let mut ui: Ui<Msg> = Ui::new(size, theme::DARK.scaled(scale));
+        let settings = memory.settings.get().clone();
+        let mut ui: Ui<Msg> = Ui::new(size, settings.theme().scaled(scale));
         ui.show_cursor(false);
-        let chrome = match fonts::load(fonts::UI) {
-            Some((_, source)) => {
-                let id = ui.add_font(source);
-                ui.set_default_font(id);
+        let mut faces = HashMap::new();
+        let ui_px = px(settings.appearance.ui_size as f32);
+        let chrome = match face(
+            &mut ui,
+            &mut faces,
+            settings.appearance.ui_font.as_deref(),
+            fonts::UI,
+        ) {
+            Some(font) => {
+                ui.set_default_font(font);
                 TextStyle {
-                    font: id,
-                    size_px: px(13.0),
+                    font,
+                    size_px: ui_px,
                 }
             }
-            None => TextStyle::built_in(px(13.0)),
+            None => TextStyle::built_in(ui_px),
         };
         let small = TextStyle {
-            size_px: px(12.0),
+            size_px: px(settings.appearance.ui_size as f32 - 1.0),
             ..chrome
         };
-        let mono = match fonts::load(fonts::MONO) {
-            Some((_, source)) => TextStyle {
-                font: ui.add_font(source),
-                size_px: px(TEXT_SIZE as f32),
+        let text_size = settings.appearance.text_size;
+        let mono = match face(
+            &mut ui,
+            &mut faces,
+            settings.appearance.text_font.as_deref(),
+            fonts::MONO,
+        ) {
+            Some(font) => TextStyle {
+                font,
+                size_px: px(text_size as f32),
             },
-            None => TextStyle::built_in(px(TEXT_SIZE as f32)),
+            None => TextStyle::built_in(px(text_size as f32)),
         };
 
         let root = ui.root();
         let (w, h) = (size.width as i32, size.height as i32);
-        let status_h = s(24);
+        let status_h = status_height(settings.appearance.ui_size, scale);
         let bar = (menus == Menus::Window).then(|| {
             let labels: Vec<String> = menu::titles(&State::default(), false)
                 .into_iter()
@@ -341,12 +369,16 @@ impl App {
         let status = ui
             .add(
                 root,
-                Label::new("").with_size(px(11.0)),
+                Label::new("").with_style(TextStyle {
+                    size_px: px(settings.appearance.ui_size as f32 - 2.0),
+                    ..chrome
+                }),
                 Rect::new(s(8), h - status_h, w - s(16), status_h),
             )
             .expect("status");
         ui.set_anchors(status, BOTTOM_ROW);
 
+        let memory_file = memory.settings.file().map(Path::to_path_buf);
         let mut app = Self {
             ui,
             tabs: Vec::new(),
@@ -360,6 +392,10 @@ impl App {
             #[cfg(target_os = "macos")]
             shown: State::default(),
             memory,
+            form: None,
+            settings_file: memory_file,
+            faces,
+            watch: Duration::from_secs(settings.general.watch_seconds as u64),
             switcher: Switcher::default(),
             next_id: 0,
             rename: None,
@@ -370,10 +406,13 @@ impl App {
             formatting: None,
             last_query: String::new(),
             highlighted: None,
+            chrome,
             small,
             mono,
-            text_size: TEXT_SIZE,
-            gutter: true,
+            text_size,
+            bar_h,
+            strip_h,
+            gutter: settings.editor.line_numbers,
             scale,
             title: "squint".into(),
             notice: String::new(),
@@ -384,6 +423,7 @@ impl App {
         };
         let front = app.restore(path);
         app.show_tab(front, true);
+        app.apply_settings();
         // The system's window tabs would take Ctrl+Tab from squint's own.
         #[cfg(target_os = "macos")]
         if menus != Menus::Off {
@@ -403,8 +443,9 @@ impl App {
     /// file named when squint was started. Returns the tab to put in front.
     fn restore(&mut self, path: Option<&Path>) -> usize {
         let session = self.memory.session.get().clone();
+        let at_line = self.memory.settings.get().general.reopen_at_line;
         let mut front = None;
-        if self.memory.settings.get().reopen_tabs {
+        if self.memory.settings.get().general.reopen_tabs {
             for (i, saved) in session.tabs.iter().enumerate() {
                 // A file that has gone since is left out, quietly: it was
                 // somebody's decision to remove it.
@@ -415,7 +456,7 @@ impl App {
                 let tab = &mut self.tabs[index];
                 tab.name = saved.name.clone();
                 tab.color = saved.color;
-                tab.pending_line = (saved.line > 0).then_some(saved.line);
+                tab.pending_line = (at_line && saved.line > 0).then_some(saved.line);
                 if i == session.active {
                     front = Some(index);
                 }
@@ -502,6 +543,24 @@ impl App {
             self.pump_syntax();
         }
         self.refresh_status();
+    }
+
+    /// Opens the settings dialog at the section called `section`, as Tools ▸
+    /// Settings… would. For a snapshot. Whether it opened.
+    pub fn open_settings_now(&mut self, section: Option<&str>) -> bool {
+        self.open_settings();
+        let Some(mut form) = self.form.take() else {
+            return false;
+        };
+        let shown = match section {
+            Some(name) => form.show_section(name, &mut self.ui),
+            None => true,
+        };
+        self.form = Some(form);
+        if !shown {
+            eprintln!("squint: no settings section called {section:?}");
+        }
+        true
     }
 
     /// Opens the menu titled `label` from the bar in the window, as a press
@@ -611,13 +670,16 @@ impl App {
 
     /// Adds a tab for `doc` at the end of the row, behind the others. Returns
     /// where it is.
-    fn add_tab(&mut self, doc: FileDocument) -> usize {
+    fn add_tab(&mut self, mut doc: FileDocument) -> usize {
         let path = doc.path().map(Path::to_path_buf);
         let format_kind = format::detect(path.as_deref(), &doc.head(8192));
+        let read_only = self.memory.settings.get().editor.read_only;
+        doc.allow_syntax(self.syntax_wanted(&doc));
         let area = TextArea::new(doc)
             .with_style(self.editor_style())
-            .with_tab_width(tab_width_for(path.as_deref()))
+            .with_tab_width(self.tab_width_for(path.as_deref()))
             .with_gutter(self.gutter)
+            .with_read_only(read_only)
             .with_change(Msg::Changed)
             .with_clipboard(Msg::Clipboard);
         let root = self.ui.root();
@@ -635,7 +697,7 @@ impl App {
             name: None,
             color: None,
             format_kind,
-            read_only: false,
+            read_only,
             ignore_changes: false,
             pending_line: None,
         });
@@ -962,6 +1024,16 @@ impl App {
         }
     }
 
+    /// Lays the settings dialog out again when the window has been resized
+    /// under it.
+    fn settle_form(&mut self) {
+        let Some(mut form) = self.form.take() else {
+            return;
+        };
+        form.resized(&mut self.ui);
+        self.form = Some(form);
+    }
+
     /// A click anywhere else ends a rename, keeping what was typed.
     fn settle_rename(&mut self) {
         if let Some(rename) = &self.rename
@@ -1021,7 +1093,6 @@ impl App {
     /// What the menus should show now.
     fn menu_state(&self) -> State {
         let tab = &self.tabs[self.active];
-        let settings = self.memory.settings.get();
         State {
             has_file: tab.path.is_some(),
             modified: self.is_modified(self.active),
@@ -1031,8 +1102,6 @@ impl App {
             recent: self.memory.recent.paths().to_vec(),
             tabs: self.tabs.len(),
             tab_color: tab.color,
-            reopen_tabs: settings.reopen_tabs,
-            ask_before_reloading: settings.ask_before_reloading,
         }
     }
 
@@ -1123,6 +1192,17 @@ impl App {
 
     /// Does what a menu row, or its keys, asks for.
     fn run(&mut self, command: Command) {
+        // The settings dialog is modal, and the system's menu bar on macOS is
+        // outside the window's scenes: a row picked there while the dialog is
+        // up is turned away here, as the keys already are. Quitting is not
+        // turned away — it closes the dialog, dropping what was typed in it,
+        // and goes on to ask about the tabs as usual.
+        if self.form.is_some() {
+            if command != Command::Quit {
+                return;
+            }
+            self.close_settings(false);
+        }
         match command {
             Command::New => {
                 let index = self.add_tab(FileDocument::empty());
@@ -1165,8 +1245,11 @@ impl App {
             Command::ZoomOut => self.zoom(-1),
             Command::ActualSize => self.zoom(0),
             Command::LineNumbers => {
+                // A View menu that is also a setting: what it does is what the
+                // settings say from now on.
                 self.gutter = !self.gutter;
                 let on = self.gutter;
+                self.memory.settings.update(|s| s.editor.line_numbers = on);
                 self.each_editor(|area| area.set_gutter(on));
             }
             Command::NextTab => self.step_tab(true),
@@ -1194,14 +1277,7 @@ impl App {
                     self.say(format!("showing {}: {e}", path.display()));
                 }
             }
-            Command::ReopenTabs => self
-                .memory
-                .settings
-                .update(|s| s.reopen_tabs = !s.reopen_tabs),
-            Command::AskBeforeReloading => self
-                .memory
-                .settings
-                .update(|s| s.ask_before_reloading = !s.ask_before_reloading),
+            Command::Settings => self.open_settings(),
             Command::Help => self.open_url(&format!("{}#readme", menu::HOME)),
             Command::ReportIssue => self.open_url(menu::ISSUES),
             Command::About => {
@@ -1333,9 +1409,9 @@ impl App {
         }
         match FileDocument::open(path) {
             Ok(doc) => {
-                let blank = self
-                    .is_blank(self.active)
-                    .then(|| self.tabs[self.active].id);
+                let reuse = self.memory.settings.get().general.open_in == OpenIn::ReuseEmptyTab;
+                let blank =
+                    (reuse && self.is_blank(self.active)).then(|| self.tabs[self.active].id);
                 let index = self.add_tab(doc);
                 self.show_tab(index, true);
                 if let Some(blank) = blank
@@ -1366,7 +1442,7 @@ impl App {
             return;
         };
         let (path, editor) = (tab.path.clone(), tab.editor);
-        let tab_width = tab_width_for(path.as_deref());
+        let tab_width = self.tab_width_for(path.as_deref());
         let Some(area) = self.area_mut(editor) else {
             return;
         };
@@ -1484,11 +1560,17 @@ impl App {
     /// reloads quietly unless the settings say to ask, and one with changes
     /// always asks.
     fn check_files(&mut self) {
-        if self.last_check.elapsed() < CHECK_FILES || self.rename.is_some() || self.ui.popup_open()
+        if self.last_check.elapsed() < self.watch
+            || self.rename.is_some()
+            || self.ui.popup_open()
+            || self.form.is_some()
         {
             return;
         }
         self.last_check = Instant::now();
+        if !self.memory.settings.get().general.watch_files {
+            return;
+        }
         let ids: Vec<TabId> = self.tabs.iter().map(|t| t.id).collect();
         for id in ids {
             let Some(index) = self.index_of(id) else {
@@ -1512,7 +1594,7 @@ impl App {
                 continue;
             }
             let modified = self.is_modified(index);
-            if !modified && !self.memory.settings.get().ask_before_reloading {
+            if !modified && !self.memory.settings.get().general.ask_before_reloading {
                 if self.reload(index) {
                     self.say(format!("reloaded {name}: it changed on disk"));
                 }
@@ -1555,14 +1637,286 @@ impl App {
         }
     }
 
+    // ---- the settings -------------------------------------------------------
+
+    /// Opens the settings dialog over everything, editing a copy of the
+    /// settings. What it does with them comes back through [`Msg::Form`].
+    fn open_settings(&mut self) {
+        if self.form.is_some() {
+            return;
+        }
+        self.close_menu();
+        self.close_prompt();
+        self.finish_rename(true);
+        let settings = self.memory.settings.get().clone();
+        let file = self.settings_file.clone();
+        self.form = Form::open(&mut self.ui, &settings, file, self.scale, self.chrome);
+        if self.form.is_none() {
+            self.say("the settings could not be opened".into());
+        }
+    }
+
+    /// Takes the dialog away. `keep_theme` for a dialog whose settings have
+    /// been applied; without it the theme a preview changed goes back.
+    fn close_settings(&mut self, keep_theme: bool) {
+        let Some(form) = self.form.take() else {
+            return;
+        };
+        form.close(&mut self.ui, keep_theme);
+        let editor = self.editor_id();
+        self.ui.focus(Some(editor));
+        self.refresh_status();
+    }
+
+    fn form_message(&mut self, msg: FormMsg) {
+        let Some(mut form) = self.form.take() else {
+            return;
+        };
+        let outcome = form.handle(msg, &mut self.ui);
+        self.form = Some(form);
+        match outcome {
+            None => {}
+            Some(Outcome::Apply) => self.save_settings(),
+            Some(Outcome::Save) => {
+                self.save_settings();
+                self.close_settings(true);
+            }
+            Some(Outcome::Close) => self.close_settings(false),
+            Some(Outcome::EditFile) => {
+                self.save_settings();
+                self.close_settings(true);
+                // The settings' real home, opened as what it is: a file —
+                // which is written first, so there is one even if nothing was
+                // changed and nothing had been kept before.
+                self.memory.settings.save();
+                if let Some(file) = self.settings_file.clone() {
+                    self.open_path(&file);
+                } else {
+                    self.say("this squint keeps no settings file".into());
+                }
+            }
+            Some(Outcome::PickFont { text }) => self.pick_font(text),
+        }
+    }
+
+    /// Writes the dialog's draft to the settings file and applies it.
+    fn save_settings(&mut self) {
+        let Some(draft) = self.form.as_ref().map(|form| form.draft().clone()) else {
+            return;
+        };
+        if draft != *self.memory.settings.get() {
+            self.memory.settings.set(draft);
+        }
+        self.apply_settings();
+        self.say(match &self.settings_file {
+            Some(file) => format!("settings saved to {}", file.display()),
+            None => "settings applied".into(),
+        });
+    }
+
+    /// Picks a TrueType file for the text, or for the chrome, and tells the
+    /// dialog about it. The whole path is what is kept: a face chosen from a
+    /// folder squint does not look in has nothing else to be called.
+    fn pick_font(&mut self, text: bool) {
+        let title = if text {
+            "A face for the text"
+        } else {
+            "A face for the menus, tabs and status line"
+        };
+        let picked = FileDialog::new()
+            .set_title(title)
+            .add_filter("TrueType fonts", &["ttf"])
+            .pick_file();
+        let Some(path) = picked else {
+            return;
+        };
+        let name = path.display().to_string();
+        if let Some(form) = &mut self.form {
+            form.set_font(&mut self.ui, text, name);
+        }
+    }
+
+    /// Makes the window what the settings say: the theme, the faces, the
+    /// text, the tab stops, the highlighting and how often files are looked
+    /// at. Everything a setting decides is decided here, so applying them is
+    /// one call whether they come from the dialog or from the file at launch.
+    fn apply_settings(&mut self) {
+        let settings = self.memory.settings.get().clone();
+        self.watch = Duration::from_secs(settings.general.watch_seconds.max(1) as u64);
+        self.memory.recent.set_limit(settings.general.recent_files);
+
+        let theme = settings.theme().scaled(self.scale);
+        if *self.ui.theme() != theme {
+            self.ui.set_theme(theme);
+        }
+
+        let px = |v: f32| (v * self.scale + 0.5) as u16;
+        let ui_size = settings.appearance.ui_size as f32;
+        let chrome = match face(
+            &mut self.ui,
+            &mut self.faces,
+            settings.appearance.ui_font.as_deref(),
+            fonts::UI,
+        ) {
+            Some(font) => {
+                self.ui.set_default_font(font);
+                TextStyle {
+                    font,
+                    size_px: px(ui_size),
+                }
+            }
+            None => TextStyle::built_in(px(ui_size)),
+        };
+        let mono_px = px(settings.appearance.text_size as f32);
+        let mono = match face(
+            &mut self.ui,
+            &mut self.faces,
+            settings.appearance.text_font.as_deref(),
+            fonts::MONO,
+        ) {
+            Some(font) => TextStyle {
+                font,
+                size_px: mono_px,
+            },
+            None => TextStyle::built_in(mono_px),
+        };
+        let chrome_changed = chrome != self.chrome;
+        self.chrome = chrome;
+        self.small = TextStyle {
+            size_px: px(ui_size - 1.0),
+            ..chrome
+        };
+        self.mono = mono;
+        self.text_size = settings.appearance.text_size;
+        if chrome_changed {
+            self.restyle_chrome();
+        }
+
+        // The text: the face and its size, the gutter, the tab stops, and
+        // whether syntect is colouring it.
+        squint_core::syntax::set_theme(&settings.highlighting.theme);
+        self.gutter = settings.editor.line_numbers;
+        let style = self.editor_style();
+        let gutter = self.gutter;
+        let tabs: Vec<(NodeId, u8)> = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.editor, self.tab_width_for(tab.path.as_deref())))
+            .collect();
+        for (editor, tab_width) in tabs {
+            let wanted = self
+                .area(editor)
+                .is_some_and(|area| self.syntax_wanted(&area.document()));
+            if let Some(area) = self.area_mut(editor) {
+                area.set_style(style);
+                area.set_gutter(gutter);
+                area.set_tab_width(tab_width);
+                // Even when nothing about the highlighting changed: the theme
+                // may have, and colours already parsed were parsed with the
+                // old one.
+                area.document_mut().allow_syntax(wanted);
+            }
+        }
+        self.refresh_status();
+    }
+
+    /// Whether a document should be coloured: the settings say so, and it is
+    /// not bigger than they allow.
+    fn syntax_wanted(&self, doc: &FileDocument) -> bool {
+        let highlighting = &self.memory.settings.get().highlighting;
+        highlighting.enabled && doc.len() <= highlighting.max_mb.saturating_mul(1 << 20)
+    }
+
+    /// Tab stops for a file: what its project says, when the settings follow
+    /// `.editorconfig` and it says anything, and the settings otherwise.
+    fn tab_width_for(&self, path: Option<&Path>) -> u8 {
+        let editor = &self.memory.settings.get().editor;
+        let from_project = editor
+            .follow_editorconfig
+            .then(|| path.map(editorconfig::properties_for))
+            .flatten()
+            .and_then(|props| props.tab_width());
+        from_project.unwrap_or(editor.tab_width)
+    }
+
+    /// Draws the menus, the tabs and the status line in the face the settings
+    /// now name. DeniseUI's menu bar takes its face when it is made, so that
+    /// one is made again.
+    fn restyle_chrome(&mut self) {
+        let w = self.ui.size().width as i32;
+        if let Some(bar) = self.bar {
+            let labels: Vec<String> = menu::titles(&State::default(), false)
+                .into_iter()
+                .map(|t| t.label)
+                .collect();
+            self.ui.remove(bar);
+            let widget = MenuBar::new(labels, Msg::MenuTitle).with_style(self.chrome);
+            let theme = *self.ui.theme();
+            let height = widget.preferred_height(&theme, self.ui.text_mut());
+            let root = self.ui.root();
+            match self.ui.add(root, widget, Rect::new(0, 0, w, height)) {
+                Some(id) => {
+                    self.ui.set_anchors(id, TOP_ROW);
+                    self.bar = Some(id);
+                    self.bar_h = height;
+                }
+                None => {
+                    self.bar = None;
+                    self.bar_h = 0;
+                }
+            }
+        }
+        let small = self.small;
+        if let Some(strip) = self.ui.widget_mut::<Tabs<Msg>>(self.strip) {
+            strip.set_style(small);
+        }
+        let theme = *self.ui.theme();
+        if let Some(strip) = self.ui.widget::<Tabs<Msg>>(self.strip) {
+            self.strip_h = strip.strip_height(&theme);
+        }
+        let status_style = TextStyle {
+            size_px: (self.chrome.size_px as f32 - 2.0 * self.scale).max(6.0) as u16,
+            ..self.chrome
+        };
+        if let Some(label) = self.ui.widget_mut::<Label>(self.status) {
+            label.set_style(status_style);
+        }
+        self.status_h = status_height(self.memory.settings.get().appearance.ui_size, self.scale);
+        self.relayout();
+    }
+
+    /// Puts the menu bar, the tabs, the text and the status line back where
+    /// they belong: after a face has changed their heights.
+    fn relayout(&mut self) {
+        let size = self.ui.size();
+        let (w, h) = (size.width as i32, size.height as i32);
+        let s = |v: i32| (v as f32 * self.scale + 0.5) as i32;
+        if let Some(bar) = self.bar {
+            self.ui.set_layout(bar, Rect::new(0, 0, w, self.bar_h));
+        }
+        self.ui
+            .set_layout(self.strip, Rect::new(0, self.bar_h, w, self.strip_h));
+        self.page_top = self.bar_h + self.strip_h;
+        self.ui.set_layout(
+            self.status,
+            Rect::new(s(8), h - self.status_h, w - s(16), self.status_h),
+        );
+        let page = self.page_rect();
+        let editors: Vec<NodeId> = self.tabs.iter().map(|t| t.editor).collect();
+        for editor in editors {
+            self.ui.set_layout(editor, page);
+        }
+    }
+
     // ---- the view -----------------------------------------------------------
 
     /// One size bigger for `1`, one smaller for `-1`, the usual for `0`. Every
     /// tab's text is the same size.
     fn zoom(&mut self, step: i32) {
         let now = self.text_size;
+        let usual = self.memory.settings.get().appearance.text_size;
         let size = match step {
-            0 => Some(TEXT_SIZE),
+            0 => Some(usual),
             s if s > 0 => TEXT_SIZES.iter().copied().find(|&t| t > now),
             _ => TEXT_SIZES.iter().rev().copied().find(|&t| t < now),
         }
@@ -1846,14 +2200,18 @@ impl App {
                 return;
             }
         };
-        // The layout is the source file's project's, looked up from where the
+        // The settings' layout, with the source file's project's over it where
+        // the settings follow one. The project is looked up from where the
         // source is: the output lands in the temporary directory, where no
         // project's .editorconfig is.
-        let props = path
-            .as_deref()
-            .map(editorconfig::properties_for)
+        let settings = self.memory.settings.get();
+        let props = settings
+            .formatting
+            .follow_editorconfig
+            .then(|| path.as_deref().map(editorconfig::properties_for))
+            .flatten()
             .unwrap_or_default();
-        let style = Style::from_editorconfig(&props);
+        let style = settings.format_style().with_editorconfig(&props);
         let note = style_note(style, &props);
         let job = self.editor_ref().document().format(kind, style);
         self.formatting = Some(Formatting {
@@ -2025,6 +2383,7 @@ impl App {
             Msg::Menu(event) => self.menu_event(event),
             Msg::Tab(event) => self.tab_event(event),
             Msg::Renamed => self.finish_rename(true),
+            Msg::Form(msg) => self.form_message(msg),
         }
     }
 
@@ -2063,11 +2422,13 @@ impl App {
             .is_some_and(|p| p.ask == Ask::Find && self.ui.focused() == Some(p.field))
     }
 
-    /// Whether any tab has a file to keep an eye on.
+    /// Whether any tab has a file to keep an eye on, and the settings say to.
     fn watching(&self) -> bool {
-        self.tabs
-            .iter()
-            .any(|t| t.path.is_some() && !t.ignore_changes)
+        self.memory.settings.get().general.watch_files
+            && self
+                .tabs
+                .iter()
+                .any(|t| t.path.is_some() && !t.ignore_changes)
     }
 }
 
@@ -2091,13 +2452,6 @@ const BOTTOM_ROW: Anchors = Anchors {
     right: true,
     bottom: true,
 };
-
-/// Tab stops as the file's project sets them, or every four columns.
-fn tab_width_for(path: Option<&Path>) -> u8 {
-    path.map(editorconfig::properties_for)
-        .and_then(|props| props.tab_width())
-        .unwrap_or(4)
-}
 
 /// Asks whether to throw the changes to `name` away.
 fn confirm_revert(name: &str) -> bool {
@@ -2165,13 +2519,38 @@ fn formatted_path(path: Option<&Path>, kind: Kind) -> PathBuf {
         .join(format!("{stem}-formatted.{ext}"))
 }
 
-/// A style in a few words, and the `.editorconfig` it came from if one did:
-/// `4 spaces, LF from /work/proj/.editorconfig`.
+/// A style in a few words, and where it came from:
+/// `4 spaces, LF from /work/proj/.editorconfig`, or from the settings.
 fn style_note(style: Style, props: &Properties) -> String {
     match props.sources().first() {
         Some(file) => format!("{} from {}", style.describe(), file.display()),
-        None => style.describe(),
+        None => format!("{} from the settings", style.describe()),
     }
+}
+
+/// How tall the status line is for a chrome of this size.
+fn status_height(ui_size: u16, scale: f32) -> i32 {
+    ((ui_size as f32 + 11.0) * scale + 0.5) as i32
+}
+
+/// The face `wanted` names, or the first of `preferred` this machine has, as a
+/// font of the tree — added once however often it is asked for.
+fn face(
+    ui: &mut Ui<Msg>,
+    faces: &mut HashMap<String, FontId>,
+    wanted: Option<&str>,
+    preferred: &[&str],
+) -> Option<FontId> {
+    let (file, source) = match wanted {
+        Some(name) => fonts::load_named(name).or_else(|| fonts::load(preferred))?,
+        None => fonts::load(preferred)?,
+    };
+    if let Some(id) = faces.get(&file) {
+        return Some(*id);
+    }
+    let id = ui.add_font(source);
+    faces.insert(file, id);
+    Some(id)
 }
 
 fn part_path(out: &Path) -> PathBuf {
@@ -2244,6 +2623,17 @@ impl DeniseApp for App {
             match event {
                 // Answered by `close_requested`, which could still say no.
                 InputEvent::CloseRequested => continue,
+                // The settings dialog is over everything, so it answers first:
+                // Escape closes it, and the window's own keys are not the
+                // dialog's to take.
+                InputEvent::Key {
+                    code: KeyCode::Escape,
+                    state: ElementState::Down,
+                    ..
+                } if self.form.is_some() && !menu_up => {
+                    self.close_settings(false);
+                    continue;
+                }
                 InputEvent::Key {
                     code: KeyCode::Escape,
                     state: ElementState::Down,
@@ -2295,7 +2685,7 @@ impl DeniseApp for App {
                     state: ElementState::Down,
                     modifiers,
                     ..
-                } if !menu_up => {
+                } if !menu_up && self.form.is_none() => {
                     if let Some(command) = menu::shortcut(*code, *modifiers) {
                         self.run(command);
                         continue;
@@ -2309,6 +2699,7 @@ impl DeniseApp for App {
         self.ui.tick(self.started.elapsed().as_millis() as u64);
         self.settle_menu();
         let acted = self.drain();
+        self.settle_form();
         self.settle_rename();
         self.sync_highlight();
         self.pump_index();
@@ -2389,10 +2780,176 @@ impl DeniseApp for App {
         // And when the files are next due a look.
         let files = self
             .watching()
-            .then(|| CHECK_FILES.saturating_sub(self.last_check.elapsed()));
+            .then(|| self.watch.saturating_sub(self.last_check.elapsed()));
         match (animation, files) {
             (Some(a), Some(f)) => Some(a.min(f)),
             (a, f) => a.or(f),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Kept;
+    use crate::recent::Recent;
+    use crate::session::Session;
+    use crate::settings_form::Action;
+
+    fn window(settings: Kept<Settings>) -> App {
+        window_with(settings, Menus::Off)
+    }
+
+    fn window_with(settings: Kept<Settings>, menus: Menus) -> App {
+        App::new(
+            Size::new(900, 600),
+            1.0,
+            None,
+            menus,
+            Remembered {
+                recent: Recent::in_memory(),
+                settings,
+                session: Kept::in_memory(Session::default()),
+            },
+        )
+    }
+
+    /// The settings file is what the window is: its theme, its text, its tab
+    /// stops and what a tab opens as.
+    #[test]
+    fn the_settings_file_decides_the_window() {
+        let mut settings = Settings::default();
+        settings.appearance.theme = "light".into();
+        settings.appearance.text_size = 20;
+        settings.editor.line_numbers = false;
+        settings.editor.tab_width = 8;
+        settings.editor.follow_editorconfig = false;
+        settings.editor.read_only = true;
+        settings.general.watch_seconds = 30;
+        let mut app = window(Kept::in_memory(settings));
+        assert_eq!(app.ui.theme().name, "light");
+        assert_eq!(app.text_size, 20);
+        assert!(!app.gutter);
+        assert_eq!(app.tab_width_for(Some(Path::new("/tmp/a.rs"))), 8);
+        assert_eq!(app.watch, Duration::from_secs(30));
+        app.run(Command::New);
+        assert!(app.tabs[app.active].read_only, "a tab opens read only");
+    }
+
+    /// Save writes the file and makes the window what it says; the dialog
+    /// closes behind it.
+    #[test]
+    fn saving_the_dialog_writes_the_settings_and_applies_them() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("settings.json");
+        let mut app = window(Kept::load_from(Some(file.clone())));
+        app.run(Command::Settings);
+        let form = app.form.as_mut().expect("the dialog");
+        form.draft_mut().appearance.text_size = 22;
+        form.draft_mut().editor.line_numbers = false;
+        app.form_message(FormMsg::Button(Action::Save));
+
+        assert!(app.form.is_none(), "Save closes the dialog");
+        assert_eq!(app.text_size, 22);
+        assert!(!app.gutter);
+        let written: Settings =
+            serde_json::from_slice(&fs::read(&file).expect("written")).expect("json");
+        assert_eq!(written.appearance.text_size, 22);
+        assert!(!written.editor.line_numbers);
+    }
+
+    /// A theme tried in the dialog is seen at once and put back by Cancel,
+    /// which writes nothing.
+    #[test]
+    fn cancelling_puts_the_theme_back_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("settings.json");
+        let mut app = window(Kept::load_from(Some(file.clone())));
+        assert_eq!(app.ui.theme().name, "dark");
+        app.run(Command::Settings);
+        app.form
+            .as_mut()
+            .expect("the dialog")
+            .draft_mut()
+            .appearance
+            .theme = "light".into();
+        // Anything happening in the dialog shows the draft's theme.
+        app.form_message(FormMsg::Ticked(true));
+        assert_eq!(app.ui.theme().name, "light", "seen while it is chosen");
+
+        app.form_message(FormMsg::Button(Action::Cancel));
+        assert!(app.form.is_none());
+        assert_eq!(app.ui.theme().name, "dark", "back to what it was");
+        assert!(!file.exists(), "Cancel writes nothing");
+    }
+
+    /// A bigger chrome makes the menus and tabs taller, and the text below
+    /// them moves down with them.
+    #[test]
+    fn a_bigger_chrome_moves_the_text_down() {
+        let mut app = window_with(Kept::in_memory(Settings::default()), Menus::Window);
+        let (bar, strip, top) = (app.bar_h, app.strip_h, app.page_top);
+        assert!(bar > 0, "the menus are in the window");
+        app.memory.settings.update(|s| s.appearance.ui_size = 22);
+        app.apply_settings();
+        assert!(app.bar_h > bar, "the menu bar is taller");
+        assert!(app.strip_h >= strip);
+        assert!(app.page_top > top);
+        assert_eq!(
+            app.ui.bounds(app.editor_id()).map(|r| r.y),
+            Some(app.page_top),
+            "the text starts under them"
+        );
+    }
+
+    /// While the dialog is up nothing else happens to the window, whichever
+    /// menu bar a row is picked from — and quitting closes it first.
+    #[test]
+    fn the_dialog_is_modal_to_the_menus_too() {
+        let mut app = window(Kept::in_memory(Settings::default()));
+        app.run(Command::Settings);
+        assert!(app.form.is_some());
+        app.run(Command::New);
+        assert_eq!(app.tabs.len(), 1, "no tab was opened behind the dialog");
+        app.run(Command::LineNumbers);
+        assert!(app.gutter, "nothing was toggled behind it");
+        app.run(Command::Quit);
+        assert!(app.form.is_none(), "quitting closes the dialog first");
+        assert!(app.exit);
+    }
+
+    /// The View menu's Line Numbers is the settings' line numbers.
+    #[test]
+    fn line_numbers_from_the_menu_are_kept() {
+        let mut app = window(Kept::in_memory(Settings::default()));
+        assert!(app.gutter);
+        app.run(Command::LineNumbers);
+        assert!(!app.gutter);
+        assert!(!app.memory.settings.get().editor.line_numbers);
+    }
+
+    /// Highlighting waits for the settings to allow it, and a file bigger than
+    /// they allow is never coloured.
+    #[test]
+    fn the_settings_decide_what_is_coloured() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("a.json");
+        fs::write(&file, "{\"a\": 1}\n").expect("write");
+        let mut settings = Settings::default();
+        settings.highlighting.enabled = false;
+        let mut app = window(Kept::in_memory(settings));
+        assert!(app.open_path(&file));
+        assert!(
+            !app.editor().document_mut().decide_syntax(),
+            "nothing is coloured while the settings say not to"
+        );
+        assert!(!app.syntax_wanted(&app.editor_ref().document()));
+
+        // Turned on, but only for files up to nothing at all: still not this one.
+        app.memory.settings.update(|s| {
+            s.highlighting.enabled = true;
+            s.highlighting.max_mb = 1;
+        });
+        assert!(app.syntax_wanted(&app.editor_ref().document()));
     }
 }

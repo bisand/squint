@@ -29,9 +29,9 @@ index instead of the lines, and show the file before it has been counted.
   it is looked at, so a file something else rewrites is not merely out of
   date: what is on screen could become a mix of the two. Every couple of
   seconds each tab's file is looked at — its size, modification time and
-  inode — and one that has changed asks whether to reload it. With Tools ▸
-  Settings ▸ Ask Before Reloading Changed Files off, a tab with no unsaved
-  changes reloads quietly; one with changes still asks.
+  inode — and one that has changed asks whether to reload it. With Ask Before
+  Reloading off in the settings, a tab with no unsaved changes reloads
+  quietly; one with changes still asks.
 - **Formatting is a stream.** Pretty-printing minified JSON or XML never
   builds a tree: a tokenizer streams from the source to a formatted file,
   which then opens the normal way. Memory stays flat however big the input.
@@ -43,7 +43,7 @@ index instead of the lines, and show the file before it has been counted.
   from the same place: `tab_width`, or a numeric `indent_size`, and every four
   columns otherwise.
 - **Highlighting is syntect's**, with the Sublime Text grammars `bat` uses and
-  the `base16-ocean.dark` theme. The grammars load on a thread, and only for a
+  the `base16-ocean.dark` theme, or any other syntect theme the settings name. The grammars load on a thread, and only for a
   file that has one: a log never pays for them. A grammar carries state from
   line to line, so the state is kept every 512 lines by a parse from the top
   in the background, the same trick as the line index. A line that parse has
@@ -72,9 +72,12 @@ index instead of the lines, and show the file before it has been counted.
   kept in the user's configuration directory. Files open in tabs — DeniseUI's
   `Tabs`, which close, drag into order, rename on a double click and take a
   colour from the menu a right click opens — and the tabs open when squint
-  closes open again when it starts, at the lines they were on (Tools ▸
-  Settings ▸ Reopen Tabs at Launch). A tab behind the others does no work
-  until it comes to the front.
+  closes open again when it starts, at the lines they were on. A tab behind
+  the others does no work until it comes to the front. What squint has been
+  told to do — themes, faces, tab stops, what is watched, what is coloured —
+  is one JSON file, with a dialog to edit it:
+  [`settings.rs`](desktop/src/settings.rs) and
+  [`settings_form.rs`](desktop/src/settings_form.rs), and see below.
 
 | Keys (⌘ on macOS, Ctrl elsewhere) | |
 |---|---|
@@ -87,6 +90,7 @@ index instead of the lines, and show the file before it has been counted.
 | ⇧⌘F | Format JSON or XML into a new file, and open it |
 | ⌘Z / ⇧⌘Z | Undo / redo; Ctrl+Y redoes too, off macOS |
 | ⌘= / ⌘- / ⌘0 | Bigger / smaller / the usual text size |
+| ⌘, | Settings |
 | F10 | Into the menu bar in the window, off macOS |
 | Ctrl+Tab | The last tab; with Ctrl held, on along the row, backwards with Shift. The control key on macOS too |
 
@@ -102,8 +106,45 @@ cargo run --release -- --time /var/log/system.log        # no window: how long t
 cargo run --release -- --snapshot out.ppm 2 some.log 1 error   # no window: one frame at 2x, at the first "error"
 cargo run --release -- --snapshot menu.ppm 2 some.log --menu File   # no window: with the File menu open in the window
 cargo run --release -- --snapshot tabs.ppm 2 --session tabs.json    # no window: with the tabs a session file lists
+cargo run --release -- --snapshot set.ppm 2 --settings Appearance   # no window: with the settings dialog open at a section
 cargo run --release -- --format dump.json pretty.json          # no window: pretty-print to a file, or to stdout
 ```
+
+## Settings
+
+Everything squint can be told is in one JSON file —
+`settings.json` in the user's configuration directory
+(`~/Library/Application Support/squint` on macOS, `~/.config/squint`
+elsewhere). The file is the settings' real home: it can be edited by hand, a
+key it does not mention is that setting's default, a value out of range is
+brought back into it, and anything squint cannot read at all is the defaults.
+
+Settings… (⌘, — in the application menu on macOS, under Tools everywhere else)
+is an editor for that file, a section at a time. Save writes it and applies
+it, Apply does both and stays, Cancel drops what was typed, and Edit the File…
+opens `settings.json` itself in a tab.
+
+- **General** — reopening the tabs at launch and at the line they were on,
+  whether a file takes the empty tab or always a new one, how many recent
+  files are kept, and how often (and whether) the tabs' files are looked at
+  for changes made by something else.
+- **Editor** — line numbers, tab stops and whether they come from the file's
+  project's `.editorconfig`, and whether files open read only.
+- **Appearance** — the theme, the face the text is drawn in and its size, and
+  the face and size of the menus, tabs and status line. A face is one of the
+  ones squint looks for, or any TrueType file. Themes are DeniseUI's `dark`,
+  `light` and `high-contrast`, plus any number written in the settings file:
+  New Theme or Duplicate makes one, and its name, whether it is light or dark
+  and its nine seed colours are edited here — shown as they are chosen, and
+  put back by Cancel.
+- **Highlighting** — whether syntect colours the text, which of its themes it
+  colours with, and the size past which a file is left alone.
+- **Formatting** — what ⇧⌘F writes: whether the source's project's
+  `.editorconfig` decides the layout, and the indent, line breaks and final
+  newline used where it does not.
+
+squint is one window with a row of tabs; opening a file never opens a second
+window, which is the roadmap's third item rather than a setting.
 
 ## Roadmap
 
