@@ -43,14 +43,21 @@ index instead of the lines, and show the file before it has been counted.
   from the same place: `tab_width`, or a numeric `indent_size`, and every four
   columns otherwise.
 - **Highlighting is syntect's**, with the Sublime Text grammars `bat` uses and
-  the `base16-ocean.dark` theme, or any other syntect theme the settings name. The grammars load on a thread, and only for a
-  file that has one: a log never pays for them. A grammar carries state from
-  line to line, so the state is kept every 512 lines by a parse from the top
-  in the background, the same trick as the line index. A line that parse has
+  the `base16-ocean.dark` theme, or any other syntect theme the settings name.
+  The grammars load on a thread, and only for a file that has one: a log never
+  pays for them. A grammar carries state from line to line, so the state is
+  kept every 512 lines by a parse from the top in the background, the same
+  trick as the line index. A line that parse has
   not reached is coloured from 256 lines above it, which is right unless a
   comment or string opened further up, and is put right when the parse gets
   there. Files over 16 MB are only ever coloured that way, and a line longer
   than 16 KB is left uncoloured.
+- **The text is drawn in Fira Code's Nerd Font**, where the machine has one:
+  squint looks for the monospaced build of it first — in the places fonts
+  live for everybody and in this user's own font folder — and falls back
+  through the platform's usual fixed faces (SF Mono, Menlo, Monaco, DejaVu
+  Sans Mono, Consolas, Courier) to Denise's built-in bitmap font. The
+  settings name another, for the text and for the chrome separately.
 
 ## Layout
 
@@ -139,12 +146,15 @@ ones it opened with, so what Save writes is what it showed.
 - **Editor** — line numbers, tab stops and whether they come from the file's
   project's `.editorconfig`, and whether files open read only.
 - **Appearance** — the theme, the face the text is drawn in and its size, and
-  the face and size of the menus, tabs and status line. A face is one of the
-  ones squint looks for, or any TrueType file. Themes are DeniseUI's `dark`,
-  `light` and `high-contrast`, plus any number written in the settings file:
-  New Theme or Duplicate makes one, and its name, whether it is light or dark
-  and its nine seed colours are edited here — shown as they are chosen, and
-  put back by Cancel.
+  the face and size of the menus, tabs and status line, which are chosen
+  separately from the text's. Each face dropdown offers the faces squint
+  reaches for by itself first, then every face installed on the machine, in
+  order — the list scrolls — and Choose a File… takes any TrueType or
+  OpenType file, wherever it is. Themes are DeniseUI's `dark`, `light` and
+  `high-contrast`, plus any number written in the settings file: New Theme or
+  Duplicate makes one, and its name, whether it is light or dark and its nine
+  seed colours are edited here — shown as they are chosen, and put back by
+  Cancel. The faces are the settings', not a theme's: a theme is colours.
 - **Highlighting** — whether syntect colours the text, which of its themes it
   colours with, and the size past which a file is left alone.
 - **Formatting** — what ⇧⌘F writes: whether the source's project's

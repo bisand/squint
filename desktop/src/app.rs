@@ -322,7 +322,9 @@ impl App {
             &mut faces,
             settings.appearance.ui_font.as_deref(),
             fonts::UI,
-        ) {
+        )
+        .0
+        {
             Some(font) => {
                 ui.set_default_font(font);
                 TextStyle {
@@ -342,7 +344,9 @@ impl App {
             &mut faces,
             settings.appearance.text_font.as_deref(),
             fonts::MONO,
-        ) {
+        )
+        .0
+        {
             Some(font) => TextStyle {
                 font,
                 size_px: px(text_size as f32),
@@ -435,7 +439,11 @@ impl App {
         };
         let front = app.restore(path);
         app.show_tab(front, true);
-        app.apply_settings();
+        // A face the settings name and this machine has not is worth saying at
+        // launch too, over whatever the tabs had to say for themselves.
+        if let Some(complaint) = app.apply_settings() {
+            app.notice = complaint;
+        }
         // The system's window tabs would take Ctrl+Tab from squint's own.
         #[cfg(target_os = "macos")]
         if menus != Menus::Off {
@@ -1641,11 +1649,11 @@ impl App {
                     if settings != *self.memory.settings.get() {
                         self.memory.settings.set(settings);
                     }
-                    self.apply_settings();
-                    self.say(match &self.settings_file {
+                    let complaint = self.apply_settings();
+                    self.say(complaint.unwrap_or_else(|| match &self.settings_file {
                         Some(file) => format!("settings saved to {}", file.display()),
                         None => "settings applied".into(),
-                    });
+                    }));
                 }
                 // Shown, not kept: only the theme, which is what the settings
                 // window offers to try. Everything else waits for Apply.
@@ -1674,15 +1682,16 @@ impl App {
         }
         if closed {
             self.settings = None;
-            self.apply_settings();
+            let _ = self.apply_settings();
         }
     }
 
     /// Makes the window what the settings say: the theme, the faces, the
     /// text, the tab stops, the highlighting and how often files are looked
     /// at. Everything a setting decides is decided here, so applying them is
-    /// one call whether they come from the dialog or from the file at launch.
-    fn apply_settings(&mut self) {
+    /// one call whether they come from the settings window or from the file at
+    /// launch. Answers with what it could not do, if anything.
+    fn apply_settings(&mut self) -> Option<String> {
         let settings = self.memory.settings.get().clone();
         self.watch = Duration::from_secs(settings.general.watch_seconds.max(1) as u64);
         self.memory.recent.set_limit(settings.general.recent_files);
@@ -1694,12 +1703,13 @@ impl App {
 
         let px = |v: f32| (v * self.scale + 0.5) as u16;
         let ui_size = settings.appearance.ui_size as f32;
-        let chrome = match face(
+        let (chrome_font, chrome_missing) = face(
             &mut self.ui,
             &mut self.faces,
             settings.appearance.ui_font.as_deref(),
             fonts::UI,
-        ) {
+        );
+        let chrome = match chrome_font {
             Some(font) => {
                 self.ui.set_default_font(font);
                 TextStyle {
@@ -1710,12 +1720,13 @@ impl App {
             None => TextStyle::built_in(px(ui_size)),
         };
         let mono_px = px(settings.appearance.text_size as f32);
-        let mono = match face(
+        let (mono_font, mono_missing) = face(
             &mut self.ui,
             &mut self.faces,
             settings.appearance.text_font.as_deref(),
             fonts::MONO,
-        ) {
+        );
+        let mono = match mono_font {
             Some(font) => TextStyle {
                 font,
                 size_px: mono_px,
@@ -1760,6 +1771,9 @@ impl App {
             }
         }
         self.refresh_status();
+        mono_missing
+            .or(chrome_missing)
+            .map(|name| format!("no face called {name} on this machine: drawing in another"))
     }
 
     /// Whether a document should be coloured: the settings say so, and it is
@@ -2476,22 +2490,31 @@ fn status_height(ui_size: u16, scale: f32) -> i32 {
 
 /// The face `wanted` names, or the first of `preferred` this machine has, as a
 /// font of the tree — added once however often it is asked for.
+///
+/// The second half of the answer is the face that was asked for and could not
+/// be used: a file removed since it was chosen, or one nothing here can read.
+/// Something else is being drawn in, and saying so is better than leaving
+/// somebody to wonder why their choice did nothing.
 fn face(
     ui: &mut Ui<Msg>,
     faces: &mut HashMap<String, FontId>,
     wanted: Option<&str>,
     preferred: &[&str],
-) -> Option<FontId> {
-    let (file, source) = match wanted {
-        Some(name) => fonts::load_named(name).or_else(|| fonts::load(preferred))?,
-        None => fonts::load(preferred)?,
+) -> (Option<FontId>, Option<String>) {
+    let asked = wanted.and_then(fonts::load_named);
+    let missing = match (wanted, &asked) {
+        (Some(name), None) => Some(name.to_string()),
+        _ => None,
+    };
+    let Some((file, source)) = asked.or_else(|| fonts::load(preferred)) else {
+        return (None, missing);
     };
     if let Some(id) = faces.get(&file) {
-        return Some(*id);
+        return (Some(*id), missing);
     }
     let id = ui.add_font(source);
     faces.insert(file, id);
-    Some(id)
+    (Some(id), missing)
 }
 
 fn part_path(out: &Path) -> PathBuf {

@@ -23,10 +23,10 @@ use crate::settings::{
     Appearance, BUILT_IN_THEMES, CustomTheme, Editor, Formatting, General, Highlighting,
     IndentStyle, NewlineStyle, OpenIn, Settings,
 };
-use denise::{Color, Rect, Role, Size};
+use denise::{Color, Point, Rect, Role, Size};
 use denise_text::TextStyle;
-use denise_ui::widgets::{Button, Checkbox, Label, List, Panel, Select, TextInput, open_select};
-use denise_ui::{NodeId, Ui};
+use denise_ui::widgets::{Button, Checkbox, Label, List, Panel, Select, TextInput};
+use denise_ui::{NodeId, Side, Ui};
 use std::path::PathBuf;
 
 /// What the dialog says to the window.
@@ -287,7 +287,7 @@ impl Form {
                 self.read(ui);
                 if let Some(control) = self.controls.get(index) {
                     let node = control.node;
-                    if open_select(ui, node, chose).is_some() {
+                    if open_dropdown(ui, node, chose).is_some() {
                         self.open = Some(index);
                     }
                 }
@@ -887,11 +887,24 @@ impl Form {
         );
     }
 
-    /// The faces offered for one kind of text: none, the ones squint looks
-    /// for that this machine has, and whatever the settings already name.
+    /// The faces offered for one kind of text: none, then the ones squint
+    /// looks for that this machine has — the ones that suit this text — then
+    /// every face installed, and last whatever the settings already name if it
+    /// is none of those.
     fn font_options(&self, preferred: &[&str], current: Option<&str>) -> Vec<String> {
         let mut options = vec![AUTOMATIC.to_string()];
         options.extend(fonts::choices(preferred));
+        let installed = fonts::installed_names();
+        if !installed.is_empty() {
+            let already = options.clone();
+            options.push(EVERY_FACE.to_string());
+            options.extend(
+                installed
+                    .iter()
+                    .filter(|name| !already.contains(name))
+                    .cloned(),
+            );
+        }
         if let Some(current) = current
             && !options.iter().any(|o| o == current)
         {
@@ -1032,6 +1045,79 @@ impl Form {
 /// What the font dropdown calls no choice at all.
 const AUTOMATIC: &str = "automatic";
 
+/// The row between the faces that suit the text and all the rest. It is a
+/// heading, not a face: the dropdown will not let it be chosen.
+const EVERY_FACE: &str = "— every face installed —";
+
+/// The most rows a dropdown shows before it scrolls, where there is room for
+/// that many.
+const DROPDOWN_ROWS: i32 = 14;
+
+/// Opens a select's options as a list that scrolls when there are more of them
+/// than fit: every face on the machine is a list no screen could drop out
+/// whole. DeniseUI's `open_select` is the short version of this — a popup, a
+/// panel and a list — with the viewport this one adds so the list can be
+/// longer than the popup.
+fn open_dropdown(
+    ui: &mut Ui<FormMsg>,
+    select: NodeId,
+    message: fn(usize) -> FormMsg,
+) -> Option<NodeId> {
+    let widget = ui.widget::<Select<FormMsg>>(select)?;
+    let options: Vec<String> = widget.options().to_vec();
+    let style = widget.style();
+    let chosen = widget.selected();
+    if options.is_empty() {
+        return None;
+    }
+    let anchor = ui.bounds(select)?;
+    let row = ui.theme().metrics.size_field;
+    let widest = options
+        .iter()
+        .map(|option| ui.text_mut().measure_line(style, option))
+        .max()
+        .unwrap_or(0);
+    // As wide as the control, or as wide as the options need.
+    let width = anchor.width.max(widest + row);
+    // As tall as the room it has: a popup lives in the window, so one taller
+    // than the space above or below its control would hang off the edge and
+    // lose its last rows. The side with the most room is the side the popup
+    // will flip to, and this is that side's height.
+    let surface = ui.size().height as i32;
+    let margin = row / 2;
+    let room = (surface - anchor.y - anchor.height - margin).max(anchor.y - margin);
+    let fits = (room / row.max(1)).clamp(1, DROPDOWN_ROWS);
+    let shown = fits.min(options.len() as i32);
+    let height = row * shown;
+    let full = row * options.len() as i32;
+
+    let container = ui.push_popup(select, Size::new(width as u32, height as u32), Side::Below)?;
+    ui.add(container, Panel::default(), Rect::new(0, 0, width, height))?;
+    let viewport = ui.add(container, Panel::bare(), Rect::new(0, 0, width, height))?;
+    ui.set_scrollable(viewport, true);
+    // Inert for selection, wired for activation: the arrows move the highlight
+    // and pull the viewport along, and only Enter or a tap reports a choice.
+    let mut list = List::inert(options.clone())
+        .on_activate(message)
+        .with_row_height(row)
+        .with_style(style)
+        .activate_on_click()
+        .with_selected(chosen);
+    for (index, option) in options.iter().enumerate() {
+        if option == EVERY_FACE {
+            list.set_row_enabled(index, false);
+        }
+    }
+    let list = ui.add(viewport, list, Rect::new(0, 0, width, full))?;
+    ui.focus(Some(list));
+    // A long list opens at what is chosen rather than at its top.
+    if let Some(index) = chosen {
+        let y = (index as i32 * row - height / 2).clamp(0, (full - height).max(0));
+        ui.set_scroll(viewport, Point::new(0, y));
+    }
+    Some(container)
+}
+
 fn font_chosen(options: &[String], current: Option<&str>) -> usize {
     current
         .and_then(|name| options.iter().position(|o| o == name))
@@ -1071,11 +1157,16 @@ fn set_choice(settings: &mut Settings, field: Field, chosen: &str) {
             }
         }
         Field::ThemeChoice => settings.appearance.theme = chosen.to_string(),
-        Field::TextFont => {
-            settings.appearance.text_font = (chosen != AUTOMATIC).then(|| chosen.to_string());
-        }
-        Field::UiFont => {
-            settings.appearance.ui_font = (chosen != AUTOMATIC).then(|| chosen.to_string());
+        Field::TextFont | Field::UiFont => {
+            if chosen == EVERY_FACE {
+                return;
+            }
+            let face = (chosen != AUTOMATIC).then(|| chosen.to_string());
+            if field == Field::TextFont {
+                settings.appearance.text_font = face;
+            } else {
+                settings.appearance.ui_font = face;
+            }
         }
         Field::SyntaxTheme => settings.highlighting.theme = chosen.to_string(),
         Field::Indent => {
@@ -1244,6 +1335,66 @@ mod tests {
         form.handle(FormMsg::Chose(crlf), &mut ui);
         assert!(!ui.popup_open(), "choosing closes it");
         assert_eq!(form.draft().formatting.newline, NewlineStyle::CrLf);
+    }
+
+    /// The faces offered are the ones that suit the text, then a heading, then
+    /// every face installed — and the heading is not a face.
+    #[test]
+    fn the_faces_offered_are_the_suitable_ones_and_then_all_of_them() {
+        let mut ui = tree();
+        let form = form(&mut ui, &Settings::default());
+        let options = form.font_options(fonts::MONO, None);
+        assert_eq!(options.first().map(String::as_str), Some(AUTOMATIC));
+        let Some(heading) = options.iter().position(|o| o == EVERY_FACE) else {
+            return; // a machine with no fonts at all has nothing to list
+        };
+        assert!(heading > 1, "the faces squint looks for come first");
+        let all = &options[heading + 1..];
+        assert!(!all.is_empty());
+        let mut sorted = all.to_vec();
+        sorted.sort_by_key(|name| name.to_lowercase());
+        assert_eq!(all, sorted, "in order");
+
+        let mut settings = Settings::default();
+        set_choice(&mut settings, Field::TextFont, EVERY_FACE);
+        assert_eq!(settings.appearance.text_font, None, "a heading, not a face");
+        set_choice(&mut settings, Field::UiFont, EVERY_FACE);
+        assert_eq!(settings.appearance.ui_font, None);
+    }
+
+    /// The faces drop out of the row that is for them, and what is chosen
+    /// there is the face that is drawn in — separately for the text and for
+    /// the chrome.
+    #[test]
+    fn the_text_and_the_chrome_take_their_faces_separately() {
+        let mut ui = tree();
+        let mut form = form(&mut ui, &Settings::default());
+        form.show_section("Appearance", &mut ui);
+        for (field, face) in [(Field::TextFont, 1usize), (Field::UiFont, 1usize)] {
+            let at = form
+                .controls
+                .iter()
+                .position(|c| c.field == field)
+                .expect("the row");
+            let offered = match &form.controls[at].kind {
+                Kind::Select(options) => options.clone(),
+                other => panic!("{other:?} is not a dropdown"),
+            };
+            // Longer than any screen would drop out whole, so it scrolls.
+            assert!(offered.len() > 1);
+            form.handle(FormMsg::OpenSelect(at), &mut ui);
+            assert!(ui.popup_open(), "the faces are listed");
+            form.handle(FormMsg::Chose(face), &mut ui);
+            assert!(!ui.popup_open());
+            let chosen = Some(offered[face].clone());
+            match field {
+                Field::TextFont => assert_eq!(form.draft().appearance.text_font, chosen),
+                _ => assert_eq!(form.draft().appearance.ui_font, chosen),
+            }
+        }
+        // One each, and neither followed the other.
+        let appearance = &form.draft().appearance;
+        assert!(appearance.text_font.is_some() && appearance.ui_font.is_some());
     }
 
     /// The buttons say what the window is to do.
