@@ -44,13 +44,15 @@ use denise_winit::{DeniseApp, Present, WindowConfig, WindowRequest};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use squint_core::editorconfig::{self, Properties};
 use squint_core::format::{self, Format, Kind, Style};
-use squint_core::{Find, FindStep};
+use squint_core::{Document, Find, FindStep};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 /// Bytes indexed per step: a few milliseconds from the page cache.
@@ -59,8 +61,12 @@ const INDEX_SLICE: usize = 8 * 1024 * 1024;
 /// Bytes searched per step.
 const FIND_SLICE: usize = 4 * 1024 * 1024;
 
-/// Bytes formatted per step.
+/// Bytes formatted per step, between frames.
 const FORMAT_SLICE: usize = 4 * 1024 * 1024;
+
+/// Bytes formatted per step on a thread of its own, which has no frame to be
+/// out of the way of: only often enough to notice it has been stopped.
+const FORMAT_THREAD_SLICE: usize = 16 * 1024 * 1024;
 
 /// How long one frame may spend walking the file, indexing or finding.
 const SLICE_TIME: Duration = Duration::from_millis(6);
@@ -165,18 +171,63 @@ struct Search {
     hit: Option<(u64, bool)>,
 }
 
-/// A format on its way into a new file.
+/// A format on its way into the tab it came from.
+///
+/// The formatted bytes are streamed to a copy of the file beside it. When it
+/// is finished the tab takes the copy up as what it holds, keeping its name
+/// and its file: what the tab shows is the same file, formatted, with unsaved
+/// changes in it. Saving renames the copy onto the file, so the bytes are
+/// written once however big the document is.
 struct Formatting {
     /// The text area whose document is being formatted.
     editor: NodeId,
-    job: Format,
+    kind: Kind,
     /// The layout used and where it came from, for the status line.
     note: String,
-    writer: BufWriter<File>,
-    /// Where it is being written: beside `out`, renamed to it when complete,
-    /// so a half-written file is never opened.
+    /// The copy being written, which the tab takes up when it is finished.
     part: PathBuf,
-    out: PathBuf,
+    /// The source's length, for the percentage.
+    len: u64,
+    work: Work,
+}
+
+/// How a format is being run.
+enum Work {
+    /// On a thread of its own, at the speed of the disk. The document is its
+    /// file and nothing else, so the thread opens that file again and reads
+    /// it without squint's frames in the way.
+    Thread {
+        /// Bytes of the source formatted so far.
+        done: Arc<AtomicU64>,
+        /// Asks the thread to give up and clear up after itself.
+        stop: Arc<AtomicBool>,
+        result: Receiver<io::Result<()>>,
+    },
+    /// In slices between frames: the document has edits in it that only this
+    /// process's piece table knows about, so the bytes must come from it.
+    Slices {
+        job: Format,
+        writer: BufWriter<File>,
+    },
+}
+
+impl Formatting {
+    /// Bytes of the source formatted so far.
+    fn done(&self) -> u64 {
+        match &self.work {
+            Work::Thread { done, .. } => done.load(Ordering::Relaxed),
+            Work::Slices { job, .. } => job.progress().0,
+        }
+    }
+
+    /// Gives up: the thread is told to stop and the half-written copy goes.
+    fn discard(self) {
+        if let Work::Thread { stop, .. } = &self.work {
+            stop.store(true, Ordering::Relaxed);
+        }
+        drop(self.work);
+        let _ = fs::remove_file(&self.part);
+    }
 }
 
 /// A menu open from the bar in the window, or from a tab.
@@ -540,13 +591,19 @@ impl App {
         }
     }
 
-    /// Formats the file as ⇧⌘F does and waits for the result to open. For a
-    /// snapshot, which has no frames to spread the work over.
+    /// Formats the file as ⇧⌘F does and waits for the tab to take it up. For
+    /// a snapshot, which has no frames to spread the work over.
     pub fn format_now(&mut self) {
         self.start_format();
         while self.formatting.is_some() {
             self.pump_format();
+            // A format on a thread is only looked in on here, so there is
+            // nothing to do between looks but wait for it.
+            if self.formatting.is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
+        self.settle_swap();
     }
 
     /// Loads the grammars, decides on one and parses the file from the top,
@@ -2145,21 +2202,15 @@ impl App {
             self.say("not JSON or XML: nothing to format".into());
             return;
         };
-        let out = formatted_path(path.as_deref(), kind);
-        let part = part_path(&out);
-        let created = fs::create_dir_all(out.parent().unwrap_or(Path::new(".")))
-            .and_then(|()| File::create(&part));
-        let file = match created {
-            Ok(file) => file,
+        let (part, file) = match make_part(path.as_deref()) {
+            Ok(made) => made,
             Err(e) => {
-                self.say(format!("formatting: {}: {e}", part.display()));
+                self.say(format!("formatting: {e}"));
                 return;
             }
         };
-        // The settings' layout, with the source file's project's over it where
-        // the settings follow one. The project is looked up from where the
-        // source is: the output lands in the temporary directory, where no
-        // project's .editorconfig is.
+        // The settings' layout, with the file's project's over it where the
+        // settings follow one.
         let settings = self.memory.settings.get();
         let props = settings
             .formatting
@@ -2169,102 +2220,144 @@ impl App {
             .unwrap_or_default();
         let style = settings.format_style().with_editorconfig(&props);
         let note = style_note(style, &props);
-        let job = self.editor_ref().document().format(kind, style);
+        // Untouched, and a file of its own: the whole format goes on a thread,
+        // which reads that file itself and runs at the speed of the disk.
+        // Otherwise the bytes can only come from this process's document, so
+        // it is stepped between frames like the index and the find.
+        let (len, edited, job) = {
+            let doc = self.editor_ref().document();
+            let edited = doc.is_modified();
+            let job = (edited || path.is_none()).then(|| doc.format(kind, style));
+            (doc.len(), edited, job)
+        };
+        let work = match (path, edited) {
+            (Some(src), false) => format_on_thread(src, kind, style, file),
+            _ => Work::Slices {
+                job: job.expect("a document that must be stepped here"),
+                writer: BufWriter::with_capacity(1 << 20, file),
+            },
+        };
         self.formatting = Some(Formatting {
             editor,
-            job,
+            kind,
             note,
-            writer: BufWriter::with_capacity(1 << 20, file),
             part,
-            out,
+            len,
+            work,
         });
         self.pump_format();
     }
 
-    /// Formats for a few milliseconds.
+    /// Looks in on the format: a few milliseconds of it where it is being
+    /// stepped here, and whether the thread has finished where it is not.
     fn pump_format(&mut self) {
         let Some(mut running) = self.formatting.take() else {
             return;
         };
-        let deadline = Instant::now() + SLICE_TIME;
-        let step = {
-            let Some(area) = self.area(running.editor) else {
-                let _ = fs::remove_file(&running.part);
-                return;
-            };
-            let doc = area.document();
-            loop {
-                match doc.format_step(&mut running.job, FORMAT_SLICE, &mut running.writer) {
-                    Ok(false) if Instant::now() < deadline => {}
-                    other => break other,
+        if self.area(running.editor).is_none() {
+            running.discard();
+            return;
+        }
+        let step = match &mut running.work {
+            Work::Thread { result, .. } => match result.try_recv() {
+                Ok(outcome) => outcome.map(|()| true),
+                Err(TryRecvError::Empty) => Ok(false),
+                Err(TryRecvError::Disconnected) => {
+                    Err(io::Error::other("the format stopped before it finished"))
+                }
+            },
+            Work::Slices { job, writer } => {
+                let deadline = Instant::now() + SLICE_TIME;
+                let doc = self.area(running.editor).expect("checked").document();
+                loop {
+                    match doc.format_step(job, FORMAT_SLICE, writer) {
+                        Ok(false) if Instant::now() < deadline => {}
+                        other => break other,
+                    }
                 }
             }
         };
         match step {
             Ok(false) => {
-                let (done, total) = running.job.progress();
-                let percent = done * 100 / total.max(1);
-                let kind = running.job.kind().name();
+                let percent = running.done() * 100 / running.len.max(1);
+                let kind = running.kind.name();
                 self.say(format!("formatting as {kind}… {percent}%"));
                 self.formatting = Some(running);
             }
             Ok(true) => self.finish_format(running),
             Err(e) => {
-                let _ = fs::remove_file(&running.part);
+                running.discard();
                 self.say(format!("formatting: {e}"));
             }
         }
     }
 
-    /// Puts the finished file in place and opens it in a new tab.
+    /// Puts the formatted copy in front of the tab it came from: the same
+    /// file, with the format in it as unsaved changes, which one undo takes
+    /// back and a save writes with a rename.
     fn finish_format(&mut self, running: Formatting) {
         let Formatting {
-            job,
+            editor,
+            kind,
             note,
-            writer,
             part,
-            out,
+            work,
             ..
         } = running;
-        let saved = writer
-            .into_inner()
-            .map_err(|e| e.into_error())
-            .and_then(|file| file.sync_all())
-            .and_then(|()| fs::rename(&part, &out));
-        if let Err(e) = saved {
+        if let Work::Slices { writer, .. } = work {
+            // The copy has to be on disk in full before it can be read back.
+            let closed = writer
+                .into_inner()
+                .map_err(|e| e.into_error())
+                .and_then(|file| file.sync_all());
+            if let Err(e) = closed {
+                let _ = fs::remove_file(&part);
+                self.say(format!("formatting: {e}"));
+                return;
+            }
+        }
+        let taken = match self.area_mut(editor) {
+            Some(area) => area.document_mut().format_in_place(&part),
+            None => {
+                let _ = fs::remove_file(&part);
+                return;
+            }
+        };
+        if let Err(e) = taken {
             let _ = fs::remove_file(&part);
             self.say(format!("formatting: {e}"));
             return;
         }
-        if let Some(index) = self.tab_with(&out) {
-            // Formatted before: the tab showing the old result reads the new.
-            self.reload(index);
-            self.show_tab(index, true);
-        } else {
-            match FileDocument::open(&out) {
-                Ok(doc) => {
-                    let index = self.add_tab(doc);
-                    self.show_tab(index, true);
-                    self.remember_tabs();
-                }
-                Err(e) => {
-                    self.say(format!("{}: {e}", out.display()));
-                    return;
-                }
-            }
+        // The formatted file is bigger than the one that was opened, and may
+        // have grown past what the settings colour.
+        let wanted = match self.area(editor) {
+            Some(area) => self.syntax_wanted(&area.document()),
+            None => return,
+        };
+        if let Some(area) = self.area_mut(editor) {
+            area.document_mut().allow_syntax(wanted);
         }
-        let kind = job.kind().name();
-        self.say(format!(
-            "formatted as {kind} with {note} into {}",
-            out.display()
-        ));
+        let kind = kind.name();
+        self.say(format!("formatted as {kind} with {note}"));
     }
 
     fn cancel_format(&mut self, why: &str) {
         if let Some(running) = self.formatting.take() {
-            drop(running.writer);
-            let _ = fs::remove_file(&running.part);
+            running.discard();
             self.say(format!("formatting stopped: {why}"));
+        }
+    }
+
+    /// Puts the view back to the top of a document that was swapped whole —
+    /// formatted, or a format undone — where its line numbers mean something
+    /// else now.
+    fn settle_swap(&mut self) {
+        let editor = self.editor_id();
+        let Some(area) = self.area_mut(editor) else {
+            return;
+        };
+        if area.document_mut().take_view_stale() {
+            area.go_to(0);
         }
     }
 
@@ -2457,21 +2550,69 @@ fn ask_about_change(name: &str, modified: bool) -> Change {
 
 /// Where a formatted copy of `path` goes: the system's temporary directory,
 /// under the file's name with `-formatted` before the extension. It keeps the
-/// extension that says what it is, and can never be the file it came from.
-fn formatted_path(path: Option<&Path>, kind: Kind) -> PathBuf {
-    let stem = path
-        .and_then(Path::file_stem)
-        .map_or_else(|| "untitled".into(), |s| s.to_string_lossy().into_owned());
-    let ext = path.and_then(Path::extension).map_or_else(
-        || match kind {
-            Kind::Json => "json".to_string(),
-            Kind::Xml => "xml".to_string(),
-        },
-        |e| e.to_string_lossy().into_owned(),
-    );
-    std::env::temp_dir()
-        .join("squint")
-        .join(format!("{stem}-formatted.{ext}"))
+/// Makes the file a format streams into: a copy beside the file being
+/// formatted, so putting it in place on a save is a rename rather than a
+/// second pass over the whole document.
+///
+/// A directory squint cannot write in — a read-only checkout, a file opened
+/// from somewhere that is not ours — falls back to the temporary directory,
+/// where the save costs a copy after all. The name is the file's, hidden, and
+/// carries this process's id, so two squints formatting the same file do not
+/// write into each other.
+fn make_part(path: Option<&Path>) -> io::Result<(PathBuf, File)> {
+    let name = path
+        .and_then(Path::file_name)
+        .map_or_else(|| "untitled".into(), |n| n.to_string_lossy().into_owned());
+    let leaf = format!(".{name}.squint-formatted.{}", std::process::id());
+    if let Some(dir) = path
+        .and_then(Path::parent)
+        .filter(|d| !d.as_os_str().is_empty())
+    {
+        let beside = dir.join(&leaf);
+        if let Ok(file) = File::create(&beside) {
+            return Ok((beside, file));
+        }
+    }
+    let dir = std::env::temp_dir().join("squint");
+    fs::create_dir_all(&dir)?;
+    let fallback = dir.join(&leaf);
+    let file = File::create(&fallback)?;
+    Ok((fallback, file))
+}
+
+/// Formats `src` into `file` on a thread of its own.
+///
+/// The thread opens the file again rather than reading the document squint
+/// has: a format is a read of the whole file and a write of a bigger one, and
+/// six milliseconds a frame of it would take three times as long as the disk
+/// does. It is only ever started for a document with nothing typed in it, so
+/// the file and the document are the same bytes.
+fn format_on_thread(src: PathBuf, kind: Kind, style: Style, file: File) -> Work {
+    let done = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, result) = mpsc::channel();
+    let (counter, flag) = (done.clone(), stop.clone());
+    std::thread::spawn(move || {
+        let outcome = (|| {
+            let doc = Document::open(&src)?;
+            let mut job = Format::new(&doc, kind, style);
+            let mut w = BufWriter::with_capacity(1 << 20, file);
+            loop {
+                if flag.load(Ordering::Relaxed) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped"));
+                }
+                let finished = job.step(&doc, FORMAT_THREAD_SLICE, &mut w)?;
+                counter.store(job.progress().0, Ordering::Relaxed);
+                if finished {
+                    break;
+                }
+            }
+            let file = w.into_inner().map_err(|e| e.into_error())?;
+            file.sync_all()
+        })();
+        let _ = tx.send(outcome);
+    });
+    Work::Thread { done, stop, result }
 }
 
 /// A style in a few words, and where it came from:
@@ -2515,12 +2656,6 @@ fn face(
     let id = ui.add_font(source);
     faces.insert(file, id);
     (Some(id), missing)
-}
-
-fn part_path(out: &Path) -> PathBuf {
-    let mut name = out.as_os_str().to_owned();
-    name.push(".part");
-    PathBuf::from(name)
 }
 
 fn name_of(path: &Path) -> String {
@@ -2658,6 +2793,7 @@ impl DeniseApp for App {
         self.settle_pending_line();
         self.pump_find();
         self.pump_format();
+        self.settle_swap();
         self.pump_syntax();
         self.check_files();
         self.hear_settings();
@@ -2710,6 +2846,15 @@ impl DeniseApp for App {
     /// the place the tabs are sure to be written down.
     fn exiting(&mut self) {
         self.remember_tabs();
+        // Quit on macOS ends the process from here: nothing below is dropped
+        // by itself, so the copies an unfinished or unsaved format left are
+        // cleared up while there is still somewhere to do it from.
+        self.cancel_format("squint is closing");
+        for editor in self.tabs.iter().map(|t| t.editor).collect::<Vec<_>>() {
+            if let Some(area) = self.area_mut(editor) {
+                area.document_mut().discard_format();
+            }
+        }
     }
 
     fn title(&self) -> Option<&str> {
@@ -2755,6 +2900,7 @@ mod tests {
     use crate::config::Kept;
     use crate::recent::Recent;
     use crate::session::Session;
+    use denise_ui::widgets::Pos;
 
     fn window(settings: Kept<Settings>) -> App {
         window_with(settings, Menus::Off)
@@ -2917,5 +3063,82 @@ mod tests {
             s.highlighting.max_mb = 1;
         });
         assert!(app.syntax_wanted(&app.editor_ref().document()));
+    }
+
+    /// ⇧⌘F puts the format in the tab it came from: the same file, the same
+    /// tab, with the formatted bytes in it as unsaved changes. Saving renames
+    /// the copy that was streamed beside the file onto it.
+    #[test]
+    fn a_format_lands_in_the_tab_it_came_from() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("dump.json");
+        fs::write(&file, r#"{"a":[1,2]}"#).expect("write");
+        let mut app = window(Kept::in_memory(Settings::default()));
+        assert!(app.open_path(&file));
+        let tabs = app.tabs.len();
+
+        app.format_now();
+        assert_eq!(app.tabs.len(), tabs, "no tab was opened for it");
+        assert_eq!(
+            app.tabs[app.active].path.as_deref(),
+            Some(file.as_path()),
+            "the tab is still that file"
+        );
+        assert!(app.is_modified(app.active), "with unsaved changes in it");
+        assert!(app.tab_label(app.active).ends_with('•'));
+        assert_eq!(
+            app.editor().document_mut().line(0).as_deref(),
+            Some("{"),
+            "formatted"
+        );
+        assert_eq!(
+            fs::read_to_string(&file).expect("read"),
+            r#"{"a":[1,2]}"#,
+            "and nothing written to the file yet"
+        );
+
+        app.run(Command::Save);
+        assert!(!app.is_modified(app.active));
+        assert_eq!(
+            fs::read_to_string(&file).expect("read"),
+            "{\n  \"a\": [\n    1,\n    2\n  ]\n}\n"
+        );
+        let strays: Vec<_> = fs::read_dir(dir.path())
+            .expect("dir")
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .filter(|n| n != "dump.json")
+            .collect();
+        assert!(strays.is_empty(), "nothing left beside it: {strays:?}");
+    }
+
+    /// A document with typing in it cannot be formatted from its file, so the
+    /// format is stepped here from the pieces — and lands the same way.
+    #[test]
+    fn a_format_of_an_edited_document_reads_the_document() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("dump.json");
+        fs::write(&file, r#"{"a":1}"#).expect("write");
+        let mut app = window(Kept::in_memory(Settings::default()));
+        assert!(app.open_path(&file));
+        app.editor()
+            .document_mut()
+            .insert(Pos::new(0, 1), r#""b":2,"#);
+        assert!(app.is_modified(app.active));
+
+        app.format_now();
+        assert!(app.formatting.is_none());
+        app.index_all();
+        let doc = app.editor().document_mut();
+        assert_eq!(doc.line(0).as_deref(), Some("{"));
+        assert_eq!(doc.line(1).as_deref(), Some(r#"  "b": 2,"#));
+
+        // And one undo takes the format back to what was typed, not to the
+        // file: the typing is still there.
+        assert!(app.editor().document_mut().undo());
+        assert_eq!(
+            app.editor().document_mut().line(0).as_deref(),
+            Some(r#"{"b":2,"a":1}"#)
+        );
+        assert!(app.is_modified(app.active));
     }
 }

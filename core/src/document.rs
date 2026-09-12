@@ -59,6 +59,10 @@ pub struct Document {
     redo: Vec<Vec<Piece>>,
     /// The pieces as they were at open or last save.
     clean: Vec<Piece>,
+    /// Modified whatever the pieces say: the document was put together from
+    /// something other than its file, and saving it would change the file.
+    /// A format in place is the one thing that does this.
+    dirty: bool,
     /// Newlines before the first unresolved piece's start, keyed by that
     /// start, so the scroll extent can be asked every frame while indexing.
     base_cache: Option<(u64, u64)>,
@@ -93,6 +97,7 @@ impl Document {
             pieces,
             undo: Vec::new(),
             redo: Vec::new(),
+            dirty: false,
             base_cache: None,
         }
     }
@@ -479,15 +484,45 @@ impl Document {
         }
     }
 
+    /// Drops what redo would put back, for a front end about to do something
+    /// of its own that redo has to come after.
+    pub fn clear_redo(&mut self) {
+        self.redo.clear();
+    }
+
     /// Whether the content differs from what was opened or last saved.
     ///
     /// Compares what the pieces point at, not their newline counts: those are
     /// filled in as the index reaches them, and counting a file is not
     /// changing it.
     pub fn is_modified(&self) -> bool {
+        self.dirty || self.is_edited()
+    }
+
+    /// Whether anything has been typed since the document was opened or last
+    /// saved, which [`mark_modified`](Self::mark_modified) does not affect.
+    /// A front end that put the document's bytes on disk itself asks this to
+    /// tell whether they are still what the document holds.
+    pub fn is_edited(&self) -> bool {
         let same = |a: &Piece, b: &Piece| a.buf == b.buf && a.start == b.start && a.len == b.len;
         self.pieces.len() != self.clean.len()
             || !self.pieces.iter().zip(&self.clean).all(|(a, b)| same(a, b))
+    }
+
+    /// Says the document differs from its file however untouched its pieces
+    /// look: it was read from somewhere else. A document a front end builds
+    /// over a formatted copy of a file says this, so the tab shows unsaved
+    /// changes and saving writes the formatted bytes back.
+    pub fn mark_modified(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Says the file now holds what the document holds, without writing it:
+    /// for a front end that put the bytes there itself, by renaming the file
+    /// they were streamed to into place.
+    pub fn mark_saved(&mut self) {
+        self.clean = self.pieces.clone();
+        self.dirty = false;
     }
 
     // ---- saving ---------------------------------------------------------
@@ -548,7 +583,7 @@ impl Document {
             let _ = fs::remove_file(&tmp);
         }
         result?;
-        self.clean = self.pieces.clone();
+        self.mark_saved();
         Ok(())
     }
 }

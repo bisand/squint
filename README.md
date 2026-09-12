@@ -24,7 +24,8 @@ index instead of the lines, and show the file before it has been counted.
 - **Saving is whole-file and atomic:** the pieces stream to a temporary file
   beside the original, which is renamed into place. Inserting in the middle
   of a file shifts every byte after it, so there is no partial save; a full
-  write at disk speed is the honest option and the safe one.
+  write at disk speed is the honest option and the safe one. A format not
+  typed in since is already such a file, so its save is the rename alone.
 - **A file changed underneath is noticed.** The document reads its file where
   it is looked at, so a file something else rewrites is not merely out of
   date: what is on screen could become a mix of the two. Every couple of
@@ -32,9 +33,17 @@ index instead of the lines, and show the file before it has been counted.
   inode — and one that has changed asks whether to reload it. With Ask Before
   Reloading off in the settings, a tab with no unsaved changes reloads
   quietly; one with changes still asks.
-- **Formatting is a stream.** Pretty-printing minified JSON or XML never
-  builds a tree: a tokenizer streams from the source to a formatted file,
-  which then opens the normal way. Memory stays flat however big the input.
+- **Formatting is a stream, into the tab it came from.** Pretty-printing
+  minified JSON or XML never builds a tree: a tokenizer streams from the
+  source to a copy of the file beside it, and the tab takes that copy up as
+  what it holds — the same file, the same tab, now with unsaved changes in
+  it. Memory stays flat however big the input, and one undo takes the format
+  back. A file with nothing typed in it is formatted on a thread of its own,
+  at the speed of the disk: 400 MB of minified JSON in about a second. One
+  with edits in it is stepped between frames instead, because only this
+  process's piece table has those bytes. Saving renames the copy onto the
+  file, so a format is written once however big it is; typing after the
+  format falls back to the ordinary save, which streams the pieces.
   The layout follows the project's [EditorConfig](https://editorconfig.org):
   `indent_style`, `indent_size`, `tab_width`, `end_of_line` and
   `insert_final_newline`, from the `.editorconfig` files above the file being
@@ -94,7 +103,7 @@ index instead of the lines, and show the file before it has been counted.
 | ⌘F | Find. Enter for the next match, Shift+Enter for the previous, Esc to close |
 | ⌘G / ⇧⌘G, F3 / ⇧F3 | Next / previous match of the last search, with the field closed |
 | ⌘L | Go to line |
-| ⇧⌘F | Format JSON or XML into a new file, and open it |
+| ⇧⌘F | Format JSON or XML in the tab it is in; ⌘Z takes it back |
 | ⌘Z / ⇧⌘Z | Undo / redo; Ctrl+Y redoes too, off macOS |
 | ⌘= / ⌘- / ⌘0 | Bigger / smaller / the usual text size |
 | ⌘, | Settings |

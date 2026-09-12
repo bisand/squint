@@ -11,10 +11,42 @@ use squint_core::format::{Format, Kind, Style};
 use squint_core::syntax::{self, Run, Syntax};
 use squint_core::{Document, Find, FindStep, Needle};
 use std::borrow::Cow;
+use std::fs;
 use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+/// A format in place, held so one undo takes it back and one redo puts it on
+/// again.
+///
+/// ⇧⌘F streams the file to a formatted copy beside it and the tab goes on
+/// showing the same file, now read from that copy; this holds whichever of
+/// the two documents is not the one on show. Both read their own file
+/// through their own handle, so swapping them costs nothing.
+struct Formatted {
+    /// The document not on show: the unformatted one while `on` is true.
+    other: Document,
+    /// Whether the formatted one is the one on show.
+    on: bool,
+    /// The file the formatted bytes were streamed to, until a save renames
+    /// it onto the real file. Deleted with the document when it is still
+    /// there.
+    part: Option<PathBuf>,
+}
+
+impl Drop for Formatted {
+    /// Takes the formatted copy with it. The document reading that copy is
+    /// this document's own and is dropped just before this, so the file is
+    /// closed by the time it goes; a file the platform will not remove while
+    /// something has it open is left behind, which is a stray file in a
+    /// temporary directory and not worth a word to anybody.
+    fn drop(&mut self) {
+        if let Some(part) = self.part.take() {
+            let _ = fs::remove_file(part);
+        }
+    }
+}
 
 pub struct FileDocument {
     doc: Document,
@@ -33,6 +65,11 @@ pub struct FileDocument {
     syntax_allowed: bool,
     /// Runs asked for, kept so a paint does not allocate a vector per line.
     runs: Vec<Run>,
+    /// A ⇧⌘F that has not been saved yet.
+    formatted: Option<Formatted>,
+    /// The document was swapped whole and the view above it is looking at
+    /// line numbers that no longer mean anything.
+    view_stale: bool,
 }
 
 impl FileDocument {
@@ -46,6 +83,8 @@ impl FileDocument {
             syntax_decided: false,
             syntax_allowed: true,
             runs: Vec::new(),
+            formatted: None,
+            view_stale: false,
         })
     }
 
@@ -59,6 +98,8 @@ impl FileDocument {
             syntax_decided: true,
             syntax_allowed: true,
             runs: Vec::new(),
+            formatted: None,
+            view_stale: false,
         }
     }
 
@@ -123,6 +164,24 @@ impl FileDocument {
         }
     }
 
+    /// Takes a format in place back, or puts it on again: the two documents
+    /// change places. `back` asks for the unformatted one. Whether there was
+    /// one to swap to, which is what tells undo and redo they had something
+    /// to do.
+    fn swap_format(&mut self, back: bool) -> bool {
+        let Some(state) = &mut self.formatted else {
+            return false;
+        };
+        if state.on != back {
+            return false;
+        }
+        std::mem::swap(&mut self.doc, &mut state.other);
+        state.on = !back;
+        self.changed_from(0);
+        self.view_stale = true;
+        true
+    }
+
     /// The text changed from `line` on.
     fn changed_from(&mut self, line: usize) {
         if let Some(syntax) = &mut self.syntax {
@@ -164,13 +223,22 @@ impl FileDocument {
     }
 
     /// Writes the document back to its file.
+    ///
+    /// A file formatted in place and not typed in since is already a file of
+    /// its own beside this one, so it goes into place with a rename: no
+    /// second pass over the document, whatever it weighs.
     pub fn save(&mut self) -> Result<(), String> {
         let Some(path) = self.path.clone() else {
             return Err("this document has no file name".into());
         };
+        if self.rename_formatted_onto(&path) {
+            return Ok(());
+        }
         self.doc
             .save_to(&path)
-            .map_err(|e| format!("saving {}: {e}", path.display()))
+            .map_err(|e| format!("saving {}: {e}", path.display()))?;
+        self.formatted = None;
+        Ok(())
     }
 
     /// Writes the document to `path` and makes that its file from now on:
@@ -179,6 +247,7 @@ impl FileDocument {
         self.doc
             .save_to(path)
             .map_err(|e| format!("saving {}: {e}", path.display()))?;
+        self.formatted = None;
         if self.path.as_deref() != Some(path) {
             self.path = Some(path.to_path_buf());
             self.syntax = None;
@@ -249,6 +318,90 @@ impl FileDocument {
         Format::new(&self.doc, kind, style)
     }
 
+    /// Takes up `part`, a formatted copy of this document's file, as what the
+    /// document holds from now on — without changing what file it is: the tab
+    /// goes on showing the same name, now with unsaved changes in it.
+    ///
+    /// The document put aside is kept, so one undo takes the format back.
+    pub fn format_in_place(&mut self, part: &Path) -> std::io::Result<()> {
+        let mut formatted = Document::open(part)?;
+        formatted.mark_modified();
+        let replaced = std::mem::replace(&mut self.doc, formatted);
+        let prior = self.formatted.take();
+        let other = match prior {
+            // Formatted again. What this replaces is an earlier format, whose
+            // copy is finished with; the document held back stays the one
+            // that was never formatted.
+            Some(mut prior) if prior.on => {
+                drop(replaced);
+                prior.part.take().inspect(|old| drop(fs::remove_file(old)));
+                // `Formatted` clears up after itself when it is dropped, so
+                // what it holds is taken out rather than moved out.
+                std::mem::replace(&mut prior.other, Document::from_text(""))
+            }
+            // Formatted after an undo took an earlier format back, so what
+            // this replaces is the unformatted document after all.
+            Some(mut prior) => {
+                prior.part.take().inspect(|old| drop(fs::remove_file(old)));
+                replaced
+            }
+            None => replaced,
+        };
+        // Redo comes after the format, never before it.
+        let mut other = other;
+        other.clear_redo();
+        self.formatted = Some(Formatted {
+            other,
+            on: true,
+            part: Some(part.to_path_buf()),
+        });
+        self.changed_from(0);
+        self.view_stale = true;
+        Ok(())
+    }
+
+    /// Drops the copy an unsaved format is being read from, for a squint on
+    /// its way out: on macOS the application menu's Quit ends the process
+    /// where it stands, so nothing here is dropped by itself and the copy
+    /// would be left beside the user's file.
+    pub fn discard_format(&mut self) {
+        self.formatted = None;
+    }
+
+    /// Whether the document was swapped whole since this was last asked, so
+    /// the view above it is showing line numbers from the other one.
+    pub fn take_view_stale(&mut self) -> bool {
+        std::mem::take(&mut self.view_stale)
+    }
+
+    /// Renames a finished format onto `path`, when there is one and nothing
+    /// has been typed since. Whether it did — a rename that cannot be done,
+    /// because the copy had to go somewhere on another filesystem, leaves the
+    /// ordinary save to do the work.
+    fn rename_formatted_onto(&mut self, path: &Path) -> bool {
+        let Some(state) = &self.formatted else {
+            return false;
+        };
+        if !state.on || self.doc.is_edited() {
+            return false;
+        }
+        let Some(part) = state.part.clone() else {
+            return false;
+        };
+        if fs::rename(&part, path).is_err() {
+            return false;
+        }
+        // The copy is the file now, so nothing is left to clear up; and the
+        // document goes on reading the same bytes through the handle it
+        // opened, because the rename moved the name, not the file.
+        if let Some(state) = &mut self.formatted {
+            state.part = None;
+        }
+        self.doc.mark_saved();
+        self.formatted = None;
+        true
+    }
+
     /// Advances `job` by up to `budget` bytes, writing into `w`. Returns
     /// whether it has finished.
     pub fn format_step<W: Write>(
@@ -302,20 +455,22 @@ impl TextDocument for FileDocument {
     }
 
     // Undo and redo do not say where the text changed, so all of it may have.
+    // With nothing typed left to take back, the next thing to undo is a
+    // format in place, which swaps the whole document rather than its pieces.
     fn undo(&mut self) -> bool {
-        let undone = self.doc.undo();
-        if undone {
+        if self.doc.undo() {
             self.changed_from(0);
+            return true;
         }
-        undone
+        self.swap_format(true)
     }
 
     fn redo(&mut self) -> bool {
-        let redone = self.doc.redo();
-        if redone {
+        if self.doc.redo() {
             self.changed_from(0);
+            return true;
         }
-        redone
+        self.swap_format(false)
     }
 
     fn spans(&mut self, n: usize, out: &mut Vec<Span>) {
@@ -338,5 +493,131 @@ impl TextDocument for FileDocument {
         if let Some(needle) = &self.highlight {
             needle.matches_in(line.as_bytes(), out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use squint_core::format::format_document;
+
+    /// A file of `text`, and a formatted copy of it beside it, as ⇧⌘F leaves
+    /// them: the copy's path and the document showing the file.
+    fn formatted(dir: &Path, text: &str) -> (PathBuf, PathBuf, FileDocument) {
+        let file = dir.join("dump.json");
+        fs::write(&file, text).unwrap();
+        let part = dir.join(".dump.json.squint-formatted");
+        let doc = Document::open(&file).unwrap();
+        let mut out = fs::File::create(&part).unwrap();
+        format_document(&doc, Kind::Json, Style::default(), &mut out).unwrap();
+        drop(out);
+        let opened = FileDocument::open(&file).unwrap();
+        (file, part, opened)
+    }
+
+    /// Counts the whole document, as the app does in slices between frames:
+    /// a line past the first is not there to be read until the index is.
+    fn index(doc: &mut FileDocument) {
+        while !doc.index_step(1 << 20) {}
+    }
+
+    fn dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("squint-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_format_in_place_keeps_the_file_and_shows_unsaved_changes() {
+        let dir = dir("in-place");
+        let (file, part, mut doc) = formatted(&dir, r#"{"a":[1,2]}"#);
+        assert!(!doc.is_modified());
+        assert_eq!(doc.line(0).as_deref(), Some(r#"{"a":[1,2]}"#));
+
+        doc.format_in_place(&part).unwrap();
+        assert_eq!(doc.path(), Some(file.as_path()), "the same file");
+        assert!(doc.is_modified(), "the file on disk is not this");
+        assert!(
+            doc.take_view_stale(),
+            "the line numbers mean something else"
+        );
+        assert_eq!(doc.line(0).as_deref(), Some("{"));
+        index(&mut doc);
+        assert_eq!(doc.line(1).as_deref(), Some(r#"  "a": ["#));
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            r#"{"a":[1,2]}"#,
+            "nothing has been written to the file yet"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_a_format_renames_the_copy_onto_the_file() {
+        let dir = dir("rename");
+        let (file, part, mut doc) = formatted(&dir, r#"{"a":[1,2]}"#);
+        doc.format_in_place(&part).unwrap();
+        doc.save().unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"a\": [\n    1,\n    2\n  ]\n}\n"
+        );
+        assert!(!part.exists(), "the copy is the file now");
+        assert!(!doc.is_modified());
+        index(&mut doc);
+        assert_eq!(doc.line(1).as_deref(), Some(r#"  "a": ["#));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_after_a_format_writes_the_document_and_leaves_no_copy() {
+        let dir = dir("edited");
+        let (file, part, mut doc) = formatted(&dir, r#"{"a":1}"#);
+        doc.format_in_place(&part).unwrap();
+        doc.insert(Pos::new(0, 1), "\n  \"b\": 2,");
+        doc.save().unwrap();
+        let written = fs::read_to_string(&file).unwrap();
+        assert!(written.starts_with("{\n  \"b\": 2,"), "{written}");
+        assert!(written.contains(r#""a": 1"#), "{written}");
+        assert!(!part.exists(), "the copy is finished with");
+        assert!(!doc.is_modified());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_undo_takes_a_format_back_and_one_redo_puts_it_on() {
+        let dir = dir("undo");
+        let (_, part, mut doc) = formatted(&dir, r#"{"a":[1,2]}"#);
+        doc.format_in_place(&part).unwrap();
+        doc.insert(Pos::new(0, 1), "X");
+        assert_eq!(doc.line(0).as_deref(), Some("{X"));
+
+        assert!(doc.undo(), "the typing");
+        assert_eq!(doc.line(0).as_deref(), Some("{"));
+        assert!(doc.is_modified(), "the format is still on");
+
+        assert!(doc.undo(), "the format");
+        assert_eq!(doc.line(0).as_deref(), Some(r#"{"a":[1,2]}"#));
+        assert!(!doc.is_modified(), "back to the file as it is");
+        assert!(doc.take_view_stale());
+
+        assert!(!doc.undo(), "and there was nothing before that");
+
+        assert!(doc.redo(), "the format again");
+        assert_eq!(doc.line(0).as_deref(), Some("{"));
+        assert!(doc.is_modified());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_document_dropped_takes_its_unsaved_copy_with_it() {
+        let dir = dir("drop");
+        let (_, part, mut doc) = formatted(&dir, r#"{"a":1}"#);
+        doc.format_in_place(&part).unwrap();
+        assert!(part.exists());
+        drop(doc);
+        assert!(!part.exists(), "an unsaved format leaves nothing behind");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
