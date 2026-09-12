@@ -13,6 +13,7 @@
 use super::{Formatter, Style};
 use memchr::memchr2;
 
+#[derive(Clone)]
 pub struct JsonFormatter {
     style: Style,
     depth: usize,
@@ -58,6 +59,16 @@ impl JsonFormatter {
 }
 
 impl Formatter for JsonFormatter {
+    fn copy(&self) -> Box<dyn Formatter + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    /// Always: every field is a flag or the depth, so there is never anything
+    /// held back and a copy is a handful of bytes wherever it is taken.
+    fn at_rest(&self) -> bool {
+        true
+    }
+
     fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) {
         let mut i = 0;
         while i < input.len() {

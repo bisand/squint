@@ -77,6 +77,16 @@ impl Document {
         Self::from_source(Box::new(MemSource(text.as_bytes().to_vec())))
     }
 
+    /// A document over `source` with an index already built for it, for a
+    /// source whose bytes were counted as they were made: a projection sees
+    /// every formatted byte exactly once, and reading the whole of it a
+    /// second time only to count the newlines would double the work.
+    pub fn from_indexed_source(source: Box<dyn Source>, index: LineIndex) -> Self {
+        let mut doc = Self::from_source(source);
+        doc.index = index;
+        doc
+    }
+
     pub fn from_source(source: Box<dyn Source>) -> Self {
         let len = source.len();
         let pieces = if len == 0 {
@@ -150,9 +160,9 @@ impl Document {
         self.pieces.is_empty()
     }
 
-    /// Bytes the document holds in memory: the index, the add buffer and the
-    /// piece lists, including undo history. The original is not counted; it
-    /// is on disk.
+    /// Bytes the document holds in memory: the index, the add buffer, the
+    /// piece lists including undo history, and whatever the source holds — a
+    /// file holds nothing, a projection holds its marks.
     pub fn memory_bytes(&self) -> usize {
         let piece = std::mem::size_of::<Piece>();
         let lists = self
@@ -163,7 +173,10 @@ impl Document {
             .sum::<usize>()
             + self.pieces.capacity()
             + self.clean.capacity();
-        self.index.memory_bytes() + self.added.capacity() + lists * piece
+        self.index.memory_bytes()
+            + self.added.capacity()
+            + lists * piece
+            + self.source.memory_bytes()
     }
 
     /// Total lines, or `None` while the index has not reached the end. A

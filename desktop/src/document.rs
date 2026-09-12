@@ -318,13 +318,15 @@ impl FileDocument {
         Format::new(&self.doc, kind, style)
     }
 
-    /// Takes up `part`, a formatted copy of this document's file, as what the
+    /// Takes up `formatted`, this document's file laid out again, as what the
     /// document holds from now on — without changing what file it is: the tab
     /// goes on showing the same name, now with unsaved changes in it.
     ///
-    /// The document put aside is kept, so one undo takes the format back.
-    pub fn format_in_place(&mut self, part: &Path) -> std::io::Result<()> {
-        let mut formatted = Document::open(part)?;
+    /// `part` is the copy on disk `formatted` reads, where there is one; a
+    /// projection reads the original file and has none, so it passes `None`
+    /// and its save streams rather than renaming. Either way the document put
+    /// aside is kept, so one undo takes the format back.
+    pub fn format_in_place(&mut self, mut formatted: Document, part: Option<PathBuf>) {
         formatted.mark_modified();
         let replaced = std::mem::replace(&mut self.doc, formatted);
         let prior = self.formatted.take();
@@ -353,11 +355,10 @@ impl FileDocument {
         self.formatted = Some(Formatted {
             other,
             on: true,
-            part: Some(part.to_path_buf()),
+            part,
         });
         self.changed_from(0);
         self.view_stale = true;
-        Ok(())
     }
 
     /// Drops the copy an unsaved format is being read from, for a squint on
@@ -535,7 +536,7 @@ mod tests {
         assert!(!doc.is_modified());
         assert_eq!(doc.line(0).as_deref(), Some(r#"{"a":[1,2]}"#));
 
-        doc.format_in_place(&part).unwrap();
+        doc.format_in_place(Document::open(&part).unwrap(), Some(part.clone()));
         assert_eq!(doc.path(), Some(file.as_path()), "the same file");
         assert!(doc.is_modified(), "the file on disk is not this");
         assert!(
@@ -557,7 +558,7 @@ mod tests {
     fn saving_a_format_renames_the_copy_onto_the_file() {
         let dir = dir("rename");
         let (file, part, mut doc) = formatted(&dir, r#"{"a":[1,2]}"#);
-        doc.format_in_place(&part).unwrap();
+        doc.format_in_place(Document::open(&part).unwrap(), Some(part.clone()));
         doc.save().unwrap();
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
@@ -574,7 +575,7 @@ mod tests {
     fn typing_after_a_format_writes_the_document_and_leaves_no_copy() {
         let dir = dir("edited");
         let (file, part, mut doc) = formatted(&dir, r#"{"a":1}"#);
-        doc.format_in_place(&part).unwrap();
+        doc.format_in_place(Document::open(&part).unwrap(), Some(part.clone()));
         doc.insert(Pos::new(0, 1), "\n  \"b\": 2,");
         doc.save().unwrap();
         let written = fs::read_to_string(&file).unwrap();
@@ -589,7 +590,7 @@ mod tests {
     fn one_undo_takes_a_format_back_and_one_redo_puts_it_on() {
         let dir = dir("undo");
         let (_, part, mut doc) = formatted(&dir, r#"{"a":[1,2]}"#);
-        doc.format_in_place(&part).unwrap();
+        doc.format_in_place(Document::open(&part).unwrap(), Some(part.clone()));
         doc.insert(Pos::new(0, 1), "X");
         assert_eq!(doc.line(0).as_deref(), Some("{X"));
 
@@ -614,7 +615,7 @@ mod tests {
     fn a_document_dropped_takes_its_unsaved_copy_with_it() {
         let dir = dir("drop");
         let (_, part, mut doc) = formatted(&dir, r#"{"a":1}"#);
-        doc.format_in_place(&part).unwrap();
+        doc.format_in_place(Document::open(&part).unwrap(), Some(part.clone()));
         assert!(part.exists());
         drop(doc);
         assert!(!part.exists(), "an unsaved format leaves nothing behind");

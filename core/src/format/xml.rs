@@ -61,6 +61,7 @@ enum Token {
     Decl,
 }
 
+#[derive(Clone)]
 pub struct XmlFormatter {
     style: Style,
     state: State,
@@ -326,6 +327,18 @@ impl XmlFormatter {
 }
 
 impl Formatter for XmlFormatter {
+    fn copy(&self) -> Box<dyn Formatter + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    /// Between markup, with no text waiting to be judged and no tag half
+    /// read: what is left is the flag per open element and a few scalars.
+    /// Minified XML is at rest after every tag, so checkpoints are never far
+    /// from where they were asked for.
+    fn at_rest(&self) -> bool {
+        self.state == State::Text && self.text.is_empty() && self.open.is_empty()
+    }
+
     fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) {
         let mut i = 0;
         while i < input.len() {

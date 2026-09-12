@@ -44,6 +44,8 @@ use denise_winit::{DeniseApp, Present, WindowConfig, WindowRequest};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use squint_core::editorconfig::{self, Properties};
 use squint_core::format::{self, Format, Kind, Style};
+use squint_core::project::Projection;
+use squint_core::source::FileSource;
 use squint_core::{Document, Find, FindStep};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -173,19 +175,15 @@ struct Search {
 
 /// A format on its way into the tab it came from.
 ///
-/// The formatted bytes are streamed to a copy of the file beside it. When it
-/// is finished the tab takes the copy up as what it holds, keeping its name
-/// and its file: what the tab shows is the same file, formatted, with unsaved
-/// changes in it. Saving renames the copy onto the file, so the bytes are
-/// written once however big the document is.
+/// When it is finished the tab takes the formatted document up as what it
+/// holds, keeping its name and its file: what the tab shows is the same file,
+/// formatted, with unsaved changes in it.
 struct Formatting {
     /// The text area whose document is being formatted.
     editor: NodeId,
     kind: Kind,
     /// The layout used and where it came from, for the status line.
     note: String,
-    /// The copy being written, which the tab takes up when it is finished.
-    part: PathBuf,
     /// The source's length, for the percentage.
     len: u64,
     work: Work,
@@ -193,21 +191,25 @@ struct Formatting {
 
 /// How a format is being run.
 enum Work {
-    /// On a thread of its own, at the speed of the disk. The document is its
-    /// file and nothing else, so the thread opens that file again and reads
-    /// it without squint's frames in the way.
-    Thread {
+    /// Projected on a thread of its own: the document is its file and nothing
+    /// else, so the thread opens that file again and formats it into marks
+    /// and a line index without writing a byte anywhere. What the tab takes
+    /// up reads the original file and lays it out where it is looked at.
+    Project {
         /// Bytes of the source formatted so far.
         done: Arc<AtomicU64>,
-        /// Asks the thread to give up and clear up after itself.
+        /// Asks the thread to give up.
         stop: Arc<AtomicBool>,
-        result: Receiver<io::Result<()>>,
+        result: Receiver<io::Result<Projection>>,
     },
-    /// In slices between frames: the document has edits in it that only this
-    /// process's piece table knows about, so the bytes must come from it.
+    /// Written to a copy beside the file, in slices between frames: the
+    /// document has edits in it that only this process's piece table knows
+    /// about, so the bytes have to come from it and there is no file to
+    /// project from. Saving renames the copy into place.
     Slices {
         job: Format,
         writer: BufWriter<File>,
+        part: PathBuf,
     },
 }
 
@@ -215,18 +217,19 @@ impl Formatting {
     /// Bytes of the source formatted so far.
     fn done(&self) -> u64 {
         match &self.work {
-            Work::Thread { done, .. } => done.load(Ordering::Relaxed),
+            Work::Project { done, .. } => done.load(Ordering::Relaxed),
             Work::Slices { job, .. } => job.progress().0,
         }
     }
 
-    /// Gives up: the thread is told to stop and the half-written copy goes.
+    /// Gives up: the thread is told to stop, and a half-written copy goes.
     fn discard(self) {
-        if let Work::Thread { stop, .. } = &self.work {
-            stop.store(true, Ordering::Relaxed);
+        match &self.work {
+            Work::Project { stop, .. } => stop.store(true, Ordering::Relaxed),
+            Work::Slices { part, .. } => {
+                let _ = fs::remove_file(part);
+            }
         }
-        drop(self.work);
-        let _ = fs::remove_file(&self.part);
     }
 }
 
@@ -2202,13 +2205,6 @@ impl App {
             self.say("not JSON or XML: nothing to format".into());
             return;
         };
-        let (part, file) = match make_part(path.as_deref()) {
-            Ok(made) => made,
-            Err(e) => {
-                self.say(format!("formatting: {e}"));
-                return;
-            }
-        };
         // The settings' layout, with the file's project's over it where the
         // settings follow one.
         let settings = self.memory.settings.get();
@@ -2220,28 +2216,36 @@ impl App {
             .unwrap_or_default();
         let style = settings.format_style().with_editorconfig(&props);
         let note = style_note(style, &props);
-        // Untouched, and a file of its own: the whole format goes on a thread,
-        // which reads that file itself and runs at the speed of the disk.
-        // Otherwise the bytes can only come from this process's document, so
-        // it is stepped between frames like the index and the find.
-        let (len, edited, job) = {
+        let (len, edited) = {
             let doc = self.editor_ref().document();
-            let edited = doc.is_modified();
-            let job = (edited || path.is_none()).then(|| doc.format(kind, style));
-            (doc.len(), edited, job)
+            (doc.len(), doc.is_modified())
         };
+        // Untouched, and a file of its own: the file is projected on a thread,
+        // which reads it once and writes nothing. A document with edits in it
+        // has bytes only this process's piece table holds, so there is nothing
+        // to project from: those are formatted into a copy beside the file,
+        // stepped between frames like the index and the find.
         let work = match (path, edited) {
-            (Some(src), false) => format_on_thread(src, kind, style, file),
-            _ => Work::Slices {
-                job: job.expect("a document that must be stepped here"),
-                writer: BufWriter::with_capacity(1 << 20, file),
-            },
+            (Some(src), false) => project_on_thread(src, kind, style),
+            (path, _) => {
+                let (part, file) = match make_part(path.as_deref()) {
+                    Ok(made) => made,
+                    Err(e) => {
+                        self.say(format!("formatting: {e}"));
+                        return;
+                    }
+                };
+                Work::Slices {
+                    job: self.editor_ref().document().format(kind, style),
+                    writer: BufWriter::with_capacity(1 << 20, file),
+                    part,
+                }
+            }
         };
         self.formatting = Some(Formatting {
             editor,
             kind,
             note,
-            part,
             len,
             work,
         });
@@ -2258,15 +2262,20 @@ impl App {
             running.discard();
             return;
         }
+        let mut projected = None;
         let step = match &mut running.work {
-            Work::Thread { result, .. } => match result.try_recv() {
-                Ok(outcome) => outcome.map(|()| true),
+            Work::Project { result, .. } => match result.try_recv() {
+                Ok(Ok(scan)) => {
+                    projected = Some(scan);
+                    Ok(true)
+                }
+                Ok(Err(e)) => Err(e),
                 Err(TryRecvError::Empty) => Ok(false),
                 Err(TryRecvError::Disconnected) => {
                     Err(io::Error::other("the format stopped before it finished"))
                 }
             },
-            Work::Slices { job, writer } => {
+            Work::Slices { job, writer, .. } => {
                 let deadline = Instant::now() + SLICE_TIME;
                 let doc = self.area(running.editor).expect("checked").document();
                 loop {
@@ -2284,7 +2293,7 @@ impl App {
                 self.say(format!("formatting as {kind}… {percent}%"));
                 self.formatting = Some(running);
             }
-            Ok(true) => self.finish_format(running),
+            Ok(true) => self.finish_format(running, projected),
             Err(e) => {
                 running.discard();
                 self.say(format!("formatting: {e}"));
@@ -2292,44 +2301,57 @@ impl App {
         }
     }
 
-    /// Puts the formatted copy in front of the tab it came from: the same
+    /// Puts the formatted document in front of the tab it came from: the same
     /// file, with the format in it as unsaved changes, which one undo takes
-    /// back and a save writes with a rename.
-    fn finish_format(&mut self, running: Formatting) {
+    /// back and a save writes.
+    fn finish_format(&mut self, running: Formatting, projected: Option<Projection>) {
         let Formatting {
             editor,
             kind,
             note,
-            part,
             work,
             ..
         } = running;
-        if let Work::Slices { writer, .. } = work {
-            // The copy has to be on disk in full before it can be read back.
-            let closed = writer
-                .into_inner()
-                .map_err(|e| e.into_error())
-                .and_then(|file| file.sync_all());
-            if let Err(e) = closed {
-                let _ = fs::remove_file(&part);
-                self.say(format!("formatting: {e}"));
-                return;
+        // A projection is a document already; a copy on disk has to be closed
+        // and opened before it can be read back.
+        let held = match (projected, work) {
+            (Some(scan), _) => match scan.into_document() {
+                Some(doc) => (doc, None),
+                None => {
+                    self.say("formatting: the scan did not finish".into());
+                    return;
+                }
+            },
+            (None, Work::Slices { writer, part, .. }) => {
+                let opened = writer
+                    .into_inner()
+                    .map_err(|e| e.into_error())
+                    .and_then(|file| file.sync_all())
+                    .and_then(|()| Document::open(&part));
+                match opened {
+                    Ok(doc) => (doc, Some(part)),
+                    Err(e) => {
+                        let _ = fs::remove_file(&part);
+                        self.say(format!("formatting: {e}"));
+                        return;
+                    }
+                }
             }
-        }
-        let taken = match self.area_mut(editor) {
-            Some(area) => area.document_mut().format_in_place(&part),
-            None => {
-                let _ = fs::remove_file(&part);
+            (None, work) => {
+                drop(work);
                 return;
             }
         };
-        if let Err(e) = taken {
-            let _ = fs::remove_file(&part);
-            self.say(format!("formatting: {e}"));
+        let (formatted, part) = held;
+        let Some(area) = self.area_mut(editor) else {
+            if let Some(part) = part {
+                let _ = fs::remove_file(part);
+            }
             return;
-        }
-        // The formatted file is bigger than the one that was opened, and may
-        // have grown past what the settings colour.
+        };
+        area.document_mut().format_in_place(formatted, part);
+        // The formatted document is bigger than the one that was opened, and
+        // may have grown past what the settings colour.
         let wanted = match self.area(editor) {
             Some(area) => self.syntax_wanted(&area.document()),
             None => return,
@@ -2580,53 +2602,38 @@ fn make_part(path: Option<&Path>) -> io::Result<(PathBuf, File)> {
     Ok((fallback, file))
 }
 
-/// Formats `src` into `file` on a thread of its own.
+/// Projects `src` on a thread of its own: one pass through the formatter,
+/// measuring and marking what comes out rather than keeping it.
 ///
 /// The thread opens the file again rather than reading the document squint
-/// has: a format is a read of the whole file and a write of a bigger one, and
-/// six milliseconds a frame of it would take three times as long as the disk
-/// does. It is only ever started for a document with nothing typed in it, so
-/// the file and the document are the same bytes.
-fn format_on_thread(src: PathBuf, kind: Kind, style: Style, file: File) -> Work {
+/// has, so squint's frames are not in the way — six milliseconds a frame
+/// would take three times as long as the disk does. It is only ever started
+/// for a document with nothing typed in it, so the file and the document are
+/// the same bytes.
+fn project_on_thread(src: PathBuf, kind: Kind, style: Style) -> Work {
     let done = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, result) = mpsc::channel();
     let (counter, flag) = (done.clone(), stop.clone());
     std::thread::spawn(move || {
         let outcome = (|| {
-            let doc = Document::open(&src)?;
-            let mut job = Format::new(&doc, kind, style);
-            let mut w = BufWriter::with_capacity(1 << 20, file);
+            let source = Arc::new(FileSource::open(&src)?);
+            let mut scan = Projection::new(source, kind, style);
             loop {
                 if flag.load(Ordering::Relaxed) {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped"));
                 }
-                let finished = job.step(&doc, FORMAT_THREAD_SLICE, &mut w)?;
-                counter.store(job.progress().0, Ordering::Relaxed);
+                let finished = scan.advance(FORMAT_THREAD_SLICE)?;
+                counter.store(scan.progress().0, Ordering::Relaxed);
                 if finished {
                     break;
                 }
             }
-            let file = w.into_inner().map_err(|e| e.into_error())?;
-            file.sync_all()
+            Ok(scan)
         })();
         let _ = tx.send(outcome);
     });
-    Work::Thread { done, stop, result }
-}
-
-/// A style in a few words, and where it came from:
-/// `4 spaces, LF from /work/proj/.editorconfig`, or from the settings.
-fn style_note(style: Style, props: &Properties) -> String {
-    match props.sources().first() {
-        Some(file) => format!("{} from {}", style.describe(), file.display()),
-        None => format!("{} from the settings", style.describe()),
-    }
-}
-
-/// How tall the status line is for a chrome of this size.
-fn status_height(ui_size: u16, scale: f32) -> i32 {
-    ((ui_size as f32 + 11.0) * scale + 0.5) as i32
+    Work::Project { done, stop, result }
 }
 
 /// The face `wanted` names, or the first of `preferred` this machine has, as a
@@ -2656,6 +2663,20 @@ fn face(
     let id = ui.add_font(source);
     faces.insert(file, id);
     (Some(id), missing)
+}
+
+/// A style in a few words, and where it came from:
+/// `4 spaces, LF from /work/proj/.editorconfig`, or from the settings.
+fn style_note(style: Style, props: &Properties) -> String {
+    match props.sources().first() {
+        Some(file) => format!("{} from {}", style.describe(), file.display()),
+        None => format!("{} from the settings", style.describe()),
+    }
+}
+
+/// How tall the status line is for a chrome of this size.
+fn status_height(ui_size: u16, scale: f32) -> i32 {
+    ((ui_size as f32 + 11.0) * scale + 0.5) as i32
 }
 
 fn name_of(path: &Path) -> String {

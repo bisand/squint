@@ -33,17 +33,21 @@ index instead of the lines, and show the file before it has been counted.
   inode — and one that has changed asks whether to reload it. With Ask Before
   Reloading off in the settings, a tab with no unsaved changes reloads
   quietly; one with changes still asks.
-- **Formatting is a stream, into the tab it came from.** Pretty-printing
-  minified JSON or XML never builds a tree: a tokenizer streams from the
-  source to a copy of the file beside it, and the tab takes that copy up as
-  what it holds — the same file, the same tab, now with unsaved changes in
-  it. Memory stays flat however big the input, and one undo takes the format
-  back. A file with nothing typed in it is formatted on a thread of its own,
-  at the speed of the disk: 400 MB of minified JSON in about a second. One
-  with edits in it is stepped between frames instead, because only this
-  process's piece table has those bytes. Saving renames the copy onto the
-  file, so a format is written once however big it is; typing after the
-  format falls back to the ordinary save, which streams the pieces.
+- **Formatting is projected, not written.** Pretty-printing minified JSON or
+  XML never builds a tree: a tokenizer streams over the source holding a
+  nesting depth and little else. ⇧⌘F runs it once over the file and keeps
+  what is small — the formatter's state every 256 KB of output, and the line
+  index built from the newlines going past — and throws the output itself
+  away. The tab then shows the same file, formatted, laid out again wherever
+  it is looked at: 400 MB of minified JSON becomes 44 million readable lines
+  in about a second, held in 559 KB, with nothing written to disk at all.
+  Reading a line anywhere costs picking the formatter up at the mark below it
+  and running to there, which is bounded whatever the document weighs. One
+  undo takes the format back, and saving writes the formatted bytes out —
+  the write that was never done. A document with typing already in it has
+  bytes only the piece table holds and nothing to project from, so that one
+  is formatted into a copy beside the file, in slices between frames, and its
+  save is the rename of that copy.
   The layout follows the project's [EditorConfig](https://editorconfig.org):
   `indent_style`, `indent_size`, `tab_width`, `end_of_line` and
   `insert_final_newline`, from the `.editorconfig` files above the file being
@@ -75,9 +79,13 @@ index instead of the lines, and show the file before it has been counted.
 
 ## Layout
 
-- [`core/`](core/) — the engine as a plain Rust crate: `Source` (file or
-  memory), `LineIndex`, `Document`. No UI, no threads of its own; a front end
-  drives the index scan in slices from a worker.
+- [`core/`](core/) — the engine as a plain Rust crate: `Source` (file,
+  memory, or the formatted form of another source), `LineIndex`, `Document`.
+  No UI, no threads of its own; a front end drives the index scan in slices
+  from a worker. A projection ([`project.rs`](core/src/project.rs)) is a
+  `Source` like the others, so the piece table, find, the highlighting and
+  saving all work over a formatted document without knowing there is no file
+  behind it.
 - [`desktop/`](desktop/) — the app: one window drawn by
   [DeniseUI](https://github.com/bisand/denise), its `TextArea` widget editing
   the engine's document through the toolkit's `TextDocument` trait, so the
@@ -187,8 +195,13 @@ a setting.
 2. Highlighting for logs, which syntect has no grammar for: ctail's line-local
    rules, through the same `spans` hook.
 3. More than one window, and tabs dragged from one to another.
-4. Long lines: a single-line multi-gigabyte JSON still has to be formatted
-   before it can be paged through; chunked lines would let it be read as is.
+4. Long lines. ⇧⌘F now pages through a single-line multi-gigabyte JSON
+   without writing anything, but the line itself is still handed to the text
+   area whole: a file with no line breaks in it at all — a disk image opened
+   by accident — builds geometry for every glyph of a line that may be
+   megabytes, which is a frame the GPU will not take. The widget wants to
+   draw the part of a line that is on screen, and squint wants to stop
+   opening things that are not text.
 
 ## License
 

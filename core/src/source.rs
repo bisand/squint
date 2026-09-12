@@ -23,6 +23,13 @@ pub trait Source: Send + Sync {
         self.len() == 0
     }
 
+    /// Bytes the source holds in memory. Nothing, for a file: that is the
+    /// whole point of it. A projection holds its marks, and a document over
+    /// one counts them in what it says it is holding.
+    fn memory_bytes(&self) -> usize {
+        0
+    }
+
     /// Reads `[offset, offset + len)` clipped to the source.
     fn read_vec(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         let mut out = vec![0; len];

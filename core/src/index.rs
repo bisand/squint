@@ -38,6 +38,27 @@ impl LineIndex {
         }
     }
 
+    /// An index built somewhere else: the length of what it describes, the
+    /// offsets of line 0 and of every `stride`-th line after it, and how many
+    /// newlines there are in all.
+    ///
+    /// For bytes that were counted as they were made — a projection formats
+    /// every byte exactly once and sees the newlines go past — where scanning
+    /// them the usual way would be a second pass over the whole document.
+    pub fn from_checkpoints(len: u64, stride: u64, checkpoints: Vec<u64>, newlines: u64) -> Self {
+        Self {
+            stride: stride.max(1),
+            checkpoints: if checkpoints.is_empty() {
+                vec![0]
+            } else {
+                checkpoints
+            },
+            len,
+            scanned: len,
+            newlines,
+        }
+    }
+
     pub fn is_complete(&self) -> bool {
         self.scanned >= self.len
     }

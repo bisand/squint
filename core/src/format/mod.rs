@@ -207,10 +207,25 @@ pub trait Formatter {
     /// Ends the input, appending whatever was held back and, if the style
     /// asks for one, a final newline.
     fn finish(&mut self, out: &mut Vec<u8>);
+
+    /// A copy that goes on from exactly here: fed the rest of the input, it
+    /// writes byte for byte what this one would have. What a projection keeps
+    /// at a checkpoint, so a formatted line can be produced without running
+    /// from the start of the document.
+    fn copy(&self) -> Box<dyn Formatter + Send + Sync>;
+
+    /// Whether nothing is being held back — no half-read token, no text
+    /// waiting to be judged only-whitespace — so a copy of this one is small.
+    ///
+    /// A projection only checkpoints where this is true. Nothing is wrong
+    /// with copying a formatter that is holding something; it is that the
+    /// something can be tens of kilobytes, and a checkpoint every thousand
+    /// lines of a long document would then be measured in gigabytes.
+    fn at_rest(&self) -> bool;
 }
 
 /// A formatter for `kind`.
-pub fn formatter(kind: Kind, style: Style) -> Box<dyn Formatter + Send> {
+pub fn formatter(kind: Kind, style: Style) -> Box<dyn Formatter + Send + Sync> {
     match kind {
         Kind::Json => Box::new(JsonFormatter::new(style)),
         Kind::Xml => Box::new(XmlFormatter::new(style)),
@@ -248,7 +263,7 @@ const CHUNK: usize = 1024 * 1024;
 /// Reads the document as it is, edits included; a front end that lets the
 /// text change underneath it should start again.
 pub struct Format {
-    formatter: Box<dyn Formatter + Send>,
+    formatter: Box<dyn Formatter + Send + Sync>,
     kind: Kind,
     style: Style,
     pos: u64,
