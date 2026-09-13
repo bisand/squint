@@ -14,10 +14,10 @@ path = "src/main.rs"
 squint-core = { path = "../core", features = ["syntax"] }
 # DeniseUI from crates.io, all four at the same version: two copies of
 # `denise` would be two types.
-denise = { version = "0.24.1", features = ["std"] }
-denise-text = { version = "0.24.1", features = ["truetype"] }
-denise-ui = { version = "0.24.1", features = ["std", "truetype"] }
-denise-winit = { version = "0.24.1", features = ["gpu"] }
+denise = { version = "0.25.0", features = ["std"] }
+denise-text = { version = "0.25.0", features = ["truetype"] }
+denise-ui = { version = "0.25.0", features = ["std", "truetype"] }
+denise-winit = { version = "0.25.0", features = ["gpu"] }
 arboard = { version = "3", default-features = false }
 # The platform's open, save and question dialogs.
 rfd = "0.15"
