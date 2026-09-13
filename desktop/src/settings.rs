@@ -84,6 +84,8 @@ pub struct Editor {
     pub follow_editorconfig: bool,
     /// Whether a file opens read only.
     pub read_only: bool,
+    /// Whether the wheel scrolls the text by the pixel rather than the line.
+    pub smooth_scroll: bool,
 }
 
 /// The theme and the faces.
@@ -228,6 +230,7 @@ impl Default for Editor {
             tab_width: 4,
             follow_editorconfig: true,
             read_only: false,
+            smooth_scroll: true,
         }
     }
 }

@@ -780,13 +780,15 @@ impl App {
     fn add_tab(&mut self, mut doc: FileDocument) -> usize {
         let path = doc.path().map(Path::to_path_buf);
         let format_kind = format::detect(path.as_deref(), &doc.head(8192));
-        let read_only = self.memory.settings.get().editor.read_only;
+        let editor = &self.memory.settings.get().editor;
+        let (read_only, smooth_scroll) = (editor.read_only, editor.smooth_scroll);
         doc.allow_syntax(self.syntax_wanted(&doc));
         let area = TextArea::new(doc)
             .with_style(self.editor_style())
             .with_tab_width(self.tab_width_for(path.as_deref()))
             .with_gutter(self.gutter)
             .with_read_only(read_only)
+            .with_smooth_scroll(smooth_scroll)
             .with_change(Msg::Changed)
             .with_clipboard(Msg::Clipboard);
         let root = self.ui.root();
@@ -1880,12 +1882,13 @@ impl App {
             self.restyle_chrome();
         }
 
-        // The text: the face and its size, the gutter, the tab stops, and
-        // whether syntect is colouring it.
+        // The text: the face and its size, the gutter, the tab stops, how the
+        // wheel scrolls it, and whether syntect is colouring it.
         squint_core::syntax::set_theme(&settings.highlighting.theme);
         self.gutter = settings.editor.line_numbers;
         let style = self.editor_style();
         let gutter = self.gutter;
+        let smooth_scroll = settings.editor.smooth_scroll;
         let tabs: Vec<(NodeId, u8)> = self
             .tabs
             .iter()
@@ -1899,6 +1902,7 @@ impl App {
                 area.set_style(style);
                 area.set_gutter(gutter);
                 area.set_tab_width(tab_width);
+                area.set_smooth_scroll(smooth_scroll);
                 // Even when nothing about the highlighting changed: the theme
                 // may have, and colours already parsed were parsed with the
                 // old one.

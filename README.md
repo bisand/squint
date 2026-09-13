@@ -167,7 +167,8 @@ ones it opened with, so what Save writes is what it showed.
   files are kept, and how often (and whether) the tabs' files are looked at
   for changes made by something else.
 - **Editor** — line numbers, tab stops and whether they come from the file's
-  project's `.editorconfig`, and whether files open read only.
+  project's `.editorconfig`, whether files open read only, and whether the
+  wheel scrolls the text a pixel at a time or a line at a time.
 - **Appearance** — the theme, the face the text is drawn in and its size, and
   the face and size of the menus, tabs and status line, which are chosen
   separately from the text's. Each face dropdown offers the faces squint

@@ -102,6 +102,7 @@ enum Field {
     TabWidth,
     EditorConfigTabs,
     ReadOnly,
+    SmoothScroll,
     ThemeChoice,
     TextFont,
     TextSize,
@@ -669,6 +670,7 @@ impl Form {
             tab_width,
             follow_editorconfig,
             read_only,
+            smooth_scroll,
         } = self.draft.editor.clone();
         self.heading(ui, "The text");
         self.check(
@@ -698,6 +700,13 @@ impl Form {
             "Open files read only",
             "A tab can be made editable again from Tools ▸ Read Only.",
             read_only,
+        );
+        self.check(
+            ui,
+            Field::SmoothScroll,
+            "Smooth scrolling",
+            "The wheel moves the text a pixel at a time. Off, it moves a line at a time.",
+            smooth_scroll,
         );
     }
 
@@ -1137,6 +1146,7 @@ fn set_check(settings: &mut Settings, field: Field, on: bool) {
         Field::LineNumbers => settings.editor.line_numbers = on,
         Field::EditorConfigTabs => settings.editor.follow_editorconfig = on,
         Field::ReadOnly => settings.editor.read_only = on,
+        Field::SmoothScroll => settings.editor.smooth_scroll = on,
         Field::ThemeDark => {
             if let Some(theme) = editing_mut(settings) {
                 theme.dark = on;
