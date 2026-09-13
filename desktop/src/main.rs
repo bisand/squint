@@ -115,6 +115,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Present::Gpu,
     };
     let menus = app::Menus::for_platform();
+    // Where the last run left the window, before there is a window to ask.
+    let window = app::Remembered::window();
     let open_path = path.clone();
     let open = move |size, scale| {
         app::App::new(
@@ -126,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             present,
         )
     };
-    match run_with(app::App::config(present), open) {
+    match run_with(app::App::config(present, window), open) {
         Err(Error::Gpu(reason) | Error::Present(reason)) if present == Present::Gpu => {
             eprintln!("squint: cannot draw through the GPU ({reason}); drawing in software");
             let open = move |size, scale| {
@@ -139,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Present::Software,
                 )
             };
-            run_with(app::App::config(Present::Software), open)?;
+            run_with(app::App::config(Present::Software, window), open)?;
             Ok(())
         }
         Err(e) => Err(e.into()),
@@ -168,7 +170,7 @@ fn snapshot(
         // file, the line and the menus are the editor window's.
         return settings_snapshot(out, scale, section, settings_file);
     }
-    let logical = app::App::config(Present::Software).size;
+    let logical = app::App::config(Present::Software, None).size;
     let size = Size::new(
         (logical.width as f32 * scale + 0.5) as u32,
         (logical.height as f32 * scale + 0.5) as u32,

@@ -101,8 +101,9 @@ index instead of the lines, and show the file before it has been counted.
   kept in the user's configuration directory. Files open in tabs — DeniseUI's
   `Tabs`, which close, drag into order, rename on a double click and take a
   colour from the menu a right click opens — and the tabs open when squint
-  closes open again when it starts, at the lines they were on. A tab behind
-  the others does no work until it comes to the front. What squint has been
+  closes open again when it starts, at the lines they were on, in a window
+  the size it was and where it was, maximised if that is how it was left. A
+  tab behind the others does no work until it comes to the front. What squint has been
   told to do — themes, faces, tab stops, what is watched, what is coloured —
   is one JSON file ([`settings.rs`](desktop/src/settings.rs)) edited in a
   window of its own ([`settings_form.rs`](desktop/src/settings_form.rs) and

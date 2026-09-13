@@ -10,8 +10,10 @@
 //! the one in front shown. A tab behind does no work: its file is counted and
 //! coloured when it comes to the front. What the tabs were — their files, the
 //! names and colours they were given, the lines they were on — is kept when
-//! squint closes, to open again when it starts; and every file is looked at
-//! every couple of seconds, in case something else has changed it.
+//! squint closes, to open again when it starts — as is the window they were
+//! in, so it opens the size it was, where it was, and maximised if that is
+//! how it was left; and every file is looked at every couple of seconds, in
+//! case something else has changed it.
 //!
 //! The menus are one list of commands (see [`menu`](crate::menu)), drawn by the
 //! system's menu bar on macOS and by DeniseUI's along the top of the window
@@ -135,6 +137,15 @@ impl Remembered {
             settings: Kept::load(settings::FILE),
             session: Kept::load(session::FILE),
         }
+    }
+
+    /// The window as the last run left it.
+    ///
+    /// Read on its own, and before [`load`](Self::load): the window has to be
+    /// asked for at the size it should open at, and that is a moment before
+    /// there is an application inside it to ask. One small file, read twice.
+    pub fn window() -> Option<session::Window> {
+        Kept::<Session>::load(session::FILE).get().window
     }
 
     /// Nothing remembered, and nothing written: for a snapshot.
@@ -337,6 +348,13 @@ pub struct App {
     strip_h: i32,
     gutter: bool,
     scale: f32,
+    /// The window as it should open next time: its size and corner while it is
+    /// not maximised, and whether it was left that way.
+    place: session::Window,
+    /// The window's inner size in logical pixels as the surface last reported
+    /// it — which while the window is maximised is the screen's, and not a
+    /// size worth opening at.
+    last_size: (u32, u32),
     title: String,
     /// What the status line says on the right: the last thing that happened.
     notice: String,
@@ -347,10 +365,20 @@ pub struct App {
 }
 
 impl App {
-    pub fn config(present: Present) -> WindowConfig {
+    /// How the window is asked for: as the last run left it, when there is a
+    /// last run to go by, and 1000×700 wherever the system likes when there is
+    /// not.
+    ///
+    /// A position the window system cannot honour — a display since unplugged —
+    /// is dropped by the backend rather than here: it is the one that knows
+    /// what is plugged in.
+    pub fn config(present: Present, window: Option<session::Window>) -> WindowConfig {
+        let window = window.and_then(session::Window::sane);
         WindowConfig {
             title: "squint".into(),
-            size: Size::new(1000, 700),
+            size: window.map_or(Size::new(1000, 700), |w| Size::new(w.width, w.height)),
+            position: window.and_then(|w| w.at).map(|at| Point::new(at.x, at.y)),
+            maximized: window.is_some_and(|w| w.maximized),
             present,
             ..WindowConfig::default()
         }
@@ -447,6 +475,21 @@ impl App {
         ui.set_anchors(status, BOTTOM_ROW);
 
         let memory_file = memory.settings.file().map(Path::to_path_buf);
+        // What was asked for, until the window system says what it actually
+        // gave: a surface half the size of a saved window means the window is
+        // that size, and the corner arrives with the first `SurfaceMoved`.
+        let last_size = (logical(size.width, scale), logical(size.height, scale));
+        let place = memory
+            .session
+            .get()
+            .window
+            .and_then(session::Window::sane)
+            .unwrap_or(session::Window {
+                width: last_size.0,
+                height: last_size.1,
+                at: None,
+                maximized: false,
+            });
         let mut app = Self {
             ui,
             tabs: Vec::new(),
@@ -484,6 +527,8 @@ impl App {
             strip_h,
             gutter: settings.editor.line_numbers,
             scale,
+            place,
+            last_size,
             title: "squint".into(),
             notice: String::new(),
             clipboard: arboard::Clipboard::new().ok(),
@@ -954,7 +999,36 @@ impl App {
         }
     }
 
-    /// Writes down the tabs with files, for the next run.
+    /// Takes in what the window system says the window is doing now.
+    ///
+    /// Only the corner and the maximised flag land straight away; the size
+    /// waits for [`settle_window`](Self::settle_window), because maximising
+    /// arrives as a resize and a move together and the resize is the one that
+    /// comes first.
+    fn note_place(&mut self, position: Point, maximized: bool) {
+        if !maximized {
+            self.place.at = Some(session::Spot {
+                x: position.x,
+                y: position.y,
+            });
+        }
+        self.place.maximized = maximized;
+    }
+
+    /// Settles what the window should open at, once a frame's events have all
+    /// been seen.
+    ///
+    /// A maximised window is the screen's size, not a size to open at: what is
+    /// kept while it is maximised is the size and corner it had before, which
+    /// are what it goes back to when it is un-maximised anyway.
+    fn settle_window(&mut self) {
+        if !self.place.maximized {
+            (self.place.width, self.place.height) = self.last_size;
+        }
+    }
+
+    /// Writes down the tabs with files and the window they are in, for the
+    /// next run.
     fn remember_tabs(&mut self) {
         let mut session = Session::default();
         for (index, tab) in self.tabs.iter().enumerate() {
@@ -975,6 +1049,7 @@ impl App {
                 line,
             });
         }
+        session.window = Some(self.place);
         if session != *self.memory.session.get() {
             self.memory.session.set(session);
         }
@@ -2675,6 +2750,15 @@ fn style_note(style: Style, props: &Properties) -> String {
 }
 
 /// How tall the status line is for a chrome of this size.
+/// A physical pixel count as logical pixels: what the window covers of the
+/// desk, whatever the display's DPI.
+fn logical(physical: u32, scale: f32) -> u32 {
+    if scale <= 0.0 {
+        return physical;
+    }
+    ((physical as f32 / scale).round() as u32).max(1)
+}
+
 fn status_height(ui_size: u16, scale: f32) -> i32 {
     ((ui_size as f32 + 11.0) * scale + 0.5) as i32
 }
@@ -2722,6 +2806,21 @@ impl DeniseApp for App {
     fn update(&mut self, events: &[InputEvent], damage: &mut DamageTracker) {
         let mut forwarded: Vec<InputEvent> = Vec::with_capacity(events.len());
         for event in events {
+            // What the window itself is doing. Noted rather than taken: the
+            // tree wants the resize as much as the window's memory does.
+            match event {
+                InputEvent::SurfaceResized { size, scale_factor } => {
+                    self.last_size = (
+                        logical(size.width, *scale_factor),
+                        logical(size.height, *scale_factor),
+                    );
+                }
+                InputEvent::SurfaceMoved {
+                    position,
+                    maximized,
+                } => self.note_place(*position, *maximized),
+                _ => {}
+            }
             // An open menu has the keyboard, Escape included.
             let menu_up = self.ui.popup_open();
             // Ctrl let go ends a walk along the tabs. A key that arrives
@@ -2816,6 +2915,7 @@ impl DeniseApp for App {
         self.pump_format();
         self.settle_swap();
         self.pump_syntax();
+        self.settle_window();
         self.check_files();
         self.hear_settings();
         self.sync_strip();
@@ -2940,6 +3040,106 @@ mod tests {
             },
             Present::Software,
         )
+    }
+
+    /// What the window system says the window is doing, in the order and the
+    /// batches it says it in.
+    fn shaped(app: &mut App, size: Size, scale: f32, at: Point, maximized: bool) {
+        let mut damage = DamageTracker::new(size);
+        app.update(
+            &[
+                InputEvent::SurfaceResized {
+                    size,
+                    scale_factor: scale,
+                },
+                InputEvent::SurfaceMoved {
+                    position: at,
+                    maximized,
+                },
+            ],
+            &mut damage,
+        );
+    }
+
+    /// A window is kept in the pixels that mean the same thing on the next
+    /// machine: the size logical, the corner physical.
+    #[test]
+    fn a_window_is_remembered_as_it_is_left() {
+        let mut app = window(Kept::in_memory(Settings::default()));
+        shaped(
+            &mut app,
+            Size::new(2400, 1600),
+            2.0,
+            Point::new(-1920, 40),
+            false,
+        );
+        assert_eq!(
+            (app.place.width, app.place.height),
+            (1200, 800),
+            "half of a Retina surface is what it covers of the desk"
+        );
+        assert_eq!(app.place.at, Some(session::Spot { x: -1920, y: 40 }));
+        assert!(!app.place.maximized);
+    }
+
+    /// Maximising is a resize to the screen and a move saying so, in that
+    /// order. The screen's size is not a size to open at, so what is kept is
+    /// the one the window had before — which is where it goes back to anyway.
+    #[test]
+    fn a_maximised_window_keeps_the_size_it_had_before() {
+        let mut app = window(Kept::in_memory(Settings::default()));
+        shaped(
+            &mut app,
+            Size::new(1200, 800),
+            1.0,
+            Point::new(120, 60),
+            false,
+        );
+        shaped(&mut app, Size::new(1920, 1080), 1.0, Point::ZERO, true);
+        assert!(app.place.maximized, "and it opens maximised again");
+        assert_eq!((app.place.width, app.place.height), (1200, 800));
+        assert_eq!(app.place.at, Some(session::Spot { x: 120, y: 60 }));
+
+        // Un-maximised, it is back to saying what it is.
+        shaped(
+            &mut app,
+            Size::new(1200, 800),
+            1.0,
+            Point::new(120, 60),
+            false,
+        );
+        assert!(!app.place.maximized);
+        assert_eq!((app.place.width, app.place.height), (1200, 800));
+    }
+
+    /// The window closes into the same file the tabs do, and opens out of it.
+    #[test]
+    fn the_window_is_written_down_and_asked_for_again() {
+        let mut app = window(Kept::in_memory(Settings::default()));
+        shaped(
+            &mut app,
+            Size::new(1280, 800),
+            1.0,
+            Point::new(64, 32),
+            false,
+        );
+        app.exiting();
+        let left = app.memory.session.get().window.expect("a window was kept");
+        assert_eq!((left.width, left.height), (1280, 800));
+
+        let config = App::config(Present::Software, Some(left));
+        assert_eq!(config.size, Size::new(1280, 800));
+        assert_eq!(config.position, Some(Point::new(64, 32)));
+        assert!(!config.maximized);
+    }
+
+    /// Nothing kept yet is the window squint has always opened at.
+    #[test]
+    fn a_first_run_opens_at_the_size_it_always_did() {
+        let config = App::config(Present::Software, None);
+        assert_eq!(config.size, Size::new(1000, 700));
+        assert_eq!(config.position, None);
+        assert!(!config.maximized);
     }
 
     /// The settings file is what the window is: its theme, its text, its tab

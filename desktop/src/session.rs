@@ -1,5 +1,5 @@
-//! The tabs that were open, so the next run can open them again, and the
-//! colours a tab can be given.
+//! The tabs that were open and the window they were in, so the next run can
+//! open them again the way they were left, and the colours a tab can be given.
 
 use denise::Color;
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,55 @@ pub struct Session {
     pub tabs: Vec<SavedTab>,
     /// Which of them was in front.
     pub active: usize,
+    /// The window they were in, as it was left. `None` before the first run
+    /// that wrote one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<Window>,
+}
+
+/// The window as a run left it, so the next one opens the same way.
+///
+/// Two kinds of pixel, because the two facts are not the same kind of fact.
+/// The size is logical: it says how much of the desk the window covers, which
+/// is what should stay the same when the file it holds is opened on a Retina
+/// display instead of an external one. The corner is physical, because a desk
+/// spanning displays of different DPI has no single logical grid to name a
+/// point in — and physical is what the window system reports and takes back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Window {
+    /// How wide the window was inside its frame, in logical pixels.
+    pub width: u32,
+    /// How tall it was inside its frame, in logical pixels.
+    pub height: u32,
+    /// Its top-left corner, frame included, in the desktop's physical pixels,
+    /// or `None` on a system that will not say where its windows are — which
+    /// is Wayland, by design.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<Spot>,
+    /// Whether it was left maximised. The size and the corner are then the
+    /// ones it goes back to when it is un-maximised, not the screen's.
+    pub maximized: bool,
+}
+
+/// A corner of the desktop, in physical pixels. Negative on a display left of
+/// or above the primary one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spot {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Window {
+    /// The smallest window worth opening again: anything smaller is a file
+    /// that has been edited or truncated into nonsense, and the defaults are
+    /// a better answer than a window nobody can use.
+    const LEAST: (u32, u32) = (400, 300);
+
+    /// What this says, when what it says is a window that can be opened.
+    pub fn sane(self) -> Option<Self> {
+        (self.width >= Self::LEAST.0 && self.height >= Self::LEAST.1).then_some(self)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,13 +160,49 @@ mod tests {
                 },
             ],
             active: 1,
+            window: Some(Window {
+                width: 1280,
+                height: 800,
+                at: Some(Spot { x: -1920, y: 40 }),
+                maximized: false,
+            }),
         };
         let json = serde_json::to_string(&session).expect("json");
         assert!(json.contains(r#""color":"teal""#), "{json}");
+        assert!(json.contains(r#""at":{"x":-1920,"y":40}"#), "{json}");
         assert!(!json.contains("null"), "nothing written that says nothing");
         assert_eq!(
             serde_json::from_str::<Session>(&json).expect("back"),
             session
+        );
+    }
+
+    #[test]
+    fn a_session_from_before_the_window_was_kept_still_reads() {
+        let session: Session =
+            serde_json::from_str(r#"{"tabs":[],"active":0}"#).expect("the old shape");
+        assert_eq!(session.window, None, "and says nothing about a window");
+    }
+
+    #[test]
+    fn a_window_too_small_to_use_is_not_worth_opening_again() {
+        let left = Window {
+            width: 1000,
+            height: 700,
+            at: None,
+            maximized: false,
+        };
+        assert_eq!(left.sane(), Some(left));
+        assert_eq!(Window::default().sane(), None, "nothing was written yet");
+        assert_eq!(
+            Window {
+                width: 40,
+                height: 20,
+                ..left
+            }
+            .sane(),
+            None,
+            "a file somebody has been editing by hand"
         );
     }
 }
