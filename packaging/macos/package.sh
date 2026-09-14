@@ -9,9 +9,11 @@
 #   MACOS_SIGN_IDENTITY   a Developer ID Application identity in a keychain;
 #                         without it the app is signed ad hoc, and a
 #                         downloaded copy is stopped by Gatekeeper
-#   APPLE_ID, APPLE_APP_PASSWORD, APPLE_TEAM_ID
-#                         with the identity, the app and the disk image are
-#                         notarized by Apple and the tickets stapled to them
+#   APP_STORE_CONNECT_KEY, APP_STORE_CONNECT_KEY_ID, APP_STORE_CONNECT_ISSUER_ID
+#                         the path of an App Store Connect API key (.p8), its
+#                         key ID and its issuer ID: with the identity, the app
+#                         and the disk image are notarized by Apple and the
+#                         tickets stapled to them
 set -euo pipefail
 
 version="$1"
@@ -25,23 +27,21 @@ trap 'rm -rf "$work"' EXIT
 
 identity="${MACOS_SIGN_IDENTITY:-}"
 notarize=""
-if [ -n "$identity" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+if [ -n "$identity" ] && [ -n "${APP_STORE_CONNECT_KEY:-}" ] && [ -n "${APP_STORE_CONNECT_KEY_ID:-}" ] && [ -n "${APP_STORE_CONNECT_ISSUER_ID:-}" ]; then
   notarize=1
+  auth=(--key "$APP_STORE_CONNECT_KEY" --key-id "$APP_STORE_CONNECT_KEY_ID" --issuer "$APP_STORE_CONNECT_ISSUER_ID")
 fi
 
 # Sends a file to Apple's notary service and waits for its verdict; on a
 # rejection, prints Apple's log of why before failing.
 notarize() {
   local file="$1" result id status
-  result="$(xcrun notarytool submit "$file" \
-    --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" \
-    --wait --timeout 30m --output-format json)"
+  result="$(xcrun notarytool submit "$file" "${auth[@]}" --wait --timeout 30m --output-format json)"
   echo "$result"
   id="$(plutil -extract id raw -o - - <<< "$result")"
   status="$(plutil -extract status raw -o - - <<< "$result")"
   if [ "$status" != Accepted ]; then
-    xcrun notarytool log "$id" \
-      --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
+    xcrun notarytool log "$id" "${auth[@]}" || true
     echo "notarization of $(basename "$file") ended $status" >&2
     return 1
   fi
@@ -74,7 +74,7 @@ if [ -n "$notarize" ]; then
   notarize "$work/squint.zip"
   xcrun stapler staple "$app"
 elif [ -n "$identity" ]; then
-  echo "APPLE_ID, APPLE_APP_PASSWORD or APPLE_TEAM_ID is not set: not notarizing" >&2
+  echo "APP_STORE_CONNECT_KEY, APP_STORE_CONNECT_KEY_ID or APP_STORE_CONNECT_ISSUER_ID is not set: not notarizing" >&2
 fi
 
 name="squint-$version-macos-universal"

@@ -15,9 +15,12 @@
 #   MACOS_CERTIFICATE           the Developer ID Application certificate and
 #                               its key, exported as .p12, in base64
 #   MACOS_CERTIFICATE_PASSWORD  the password the .p12 was exported with
-#   APPLE_ID                    the Apple Account of the developer team
-#   APPLE_APP_PASSWORD          an app-specific password for that account
-#   APPLE_TEAM_ID               the team's ten-character ID
+#   APP_STORE_CONNECT_API_KEY_BASE64
+#                               an App Store Connect API key (AuthKey_*.p8),
+#                               in base64, which notarizes
+#   APP_STORE_CONNECT_KEY_ID    that key's ID, the part of its file name
+#                               after AuthKey_
+#   APP_STORE_CONNECT_ISSUER_ID the issuer ID shown above the team's keys
 name: release
 
 on:
@@ -180,10 +183,14 @@ jobs:
           echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
       - name: Package
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
+          if [ -n "$APP_STORE_CONNECT_API_KEY_BASE64" ]; then
+            export APP_STORE_CONNECT_KEY="$RUNNER_TEMP/AuthKey.p8"
+            echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$APP_STORE_CONNECT_KEY"
+          fi
           packaging/macos/package.sh "$VERSION" \
             target/aarch64-apple-darwin/release/squint \
             target/x86_64-apple-darwin/release/squint \
@@ -193,11 +200,12 @@ jobs:
           name: macos
           path: dist/*
           if-no-files-found: error
-      - name: Remove the signing keychain
+      - name: Remove the signing keychain and key
         if: always()
         run: |
           keychain="$RUNNER_TEMP/signing.keychain-db"
           if [ -f "$keychain" ]; then security delete-keychain "$keychain"; fi
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
 
   windows:
     needs: version
