@@ -10,6 +10,31 @@ squint is a sibling of [ctail](https://github.com/bisand/ctail) and borrows
 its engine ideas: read the file only where it is looked at, keep a sparse line
 index instead of the lines, and show the file before it has been counted.
 
+## Install
+
+Every [release](https://github.com/bisand/squint/releases) carries packages
+built by [`release.yml`](.github/workflows/release.yml) when it is published:
+
+| | |
+|---|---|
+| macOS (Apple silicon and Intel) | `.dmg` with `squint.app`, or the bare binary in a `.tar.gz` |
+| Windows (x64, ARM64) | `-setup.exe` installer, or a `.zip` |
+| Debian, Ubuntu, Mint | `.deb` — `sudo apt install ./squint_*.deb` |
+| Fedora, RHEL, openSUSE | `.rpm` — `sudo dnf install ./squint-*.rpm` |
+| Arch | `.pkg.tar.zst` — `sudo pacman -U squint-bin-*.pkg.tar.zst` |
+| Any Linux | `.AppImage`, or a `.tar.gz` to unpack over `/usr/local` |
+
+The macOS app and the Windows installer are not signed with a paid
+certificate, so the first launch needs a right click → Open on macOS, and
+More info → Run anyway on Windows. `SHA256SUMS.txt` beside the packages
+checks what was downloaded.
+
+To make one, tag a semver version and publish a release on it:
+
+```bash
+gh release create v0.2.0 --generate-notes
+```
+
 ## How it works
 
 - **The file is never loaded.** The document is a piece table: the original

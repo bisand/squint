@@ -1,0 +1,26 @@
+# Arch Linux package around the prebuilt release tarball, made by the release
+# workflow; `pkgver` and the tarball beside this file are filled in there.
+pkgname=squint-bin
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Text editor for files too big for text editors"
+arch=('x86_64' 'aarch64')
+url="https://github.com/bisand/squint"
+license=('MIT')
+depends=('glibc' 'libxkbcommon')
+optdepends=('wayland: Wayland sessions'
+            'libx11: X11 sessions'
+            'libxcursor: X11 sessions'
+            'libxrandr: X11 sessions'
+            'libxi: X11 sessions'
+            'vulkan-icd-loader: GPU drawing'
+            'xdg-desktop-portal: open and save dialogs')
+provides=('squint')
+conflicts=('squint')
+options=('!strip' '!debug')
+source=("squint.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cp -a "$srcdir"/squint-*/. "$pkgdir/usr/"
+}

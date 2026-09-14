@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=squint
+GenericName=Text Editor
+Comment=Opens huge text files instantly, lets you look, tweak and save
+Exec=squint %f
+Icon=squint
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/plain;application/json;application/xml;text/xml;text/csv;text/x-log;
+Keywords=text;editor;log;json;large;
+StartupWMClass=squint
