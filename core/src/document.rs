@@ -276,10 +276,10 @@ impl Document {
         if rel == 0 {
             return Ok(Some(0));
         }
-        if let Some(nl) = p.newlines {
-            if rel > nl {
-                return Ok(None);
-            }
+        if let Some(nl) = p.newlines
+            && rel > nl
+        {
+            return Ok(None);
         }
         match p.buf {
             Buf::Added => {

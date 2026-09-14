@@ -355,7 +355,7 @@ impl Syntax {
             line = i + 1;
             parsed += 1;
             // The clock is read every so many lines, not every one.
-            !(parsed % 64 == 0 && Instant::now() >= deadline)
+            !(parsed.is_multiple_of(64) && Instant::now() >= deadline)
         })?;
         self.frontier = (line, state);
         self.settled = ended;

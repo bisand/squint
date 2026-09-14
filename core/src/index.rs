@@ -93,7 +93,7 @@ impl LineIndex {
             }
             for i in memchr::memchr_iter(b'\n', &buf[..n]) {
                 self.newlines += 1;
-                if self.newlines % self.stride == 0 {
+                if self.newlines.is_multiple_of(self.stride) {
                     self.checkpoints.push(self.scanned + i as u64 + 1);
                 }
             }

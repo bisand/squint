@@ -2475,11 +2475,7 @@ impl App {
         let lines = if doc.is_indexed() {
             format!("{} lines", doc.line_count().unwrap_or(0))
         } else {
-            let percent = if total == 0 {
-                100
-            } else {
-                scanned * 100 / total
-            };
+            let percent = (scanned * 100).checked_div(total).unwrap_or(100);
             format!("counting… {percent}%")
         };
         let syntax = doc
