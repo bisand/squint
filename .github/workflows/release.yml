@@ -8,6 +8,16 @@
 # The version comes from the release's tag (v1.2.3 → 1.2.3). Run by hand, or
 # on a pull request that changes the packaging, it builds and keeps the
 # packages as workflow artifacts without touching any release.
+#
+# The macOS app is signed with a Developer ID and notarized when these
+# repository secrets are set, and signed ad hoc when they are not:
+#
+#   MACOS_CERTIFICATE           the Developer ID Application certificate and
+#                               its key, exported as .p12, in base64
+#   MACOS_CERTIFICATE_PASSWORD  the password the .p12 was exported with
+#   APPLE_ID                    the Apple Account of the developer team
+#   APPLE_APP_PASSWORD          an app-specific password for that account
+#   APPLE_TEAM_ID               the team's ten-character ID
 name: release
 
 on:
@@ -134,7 +144,45 @@ jobs:
         run: cargo build --release -p squint --target aarch64-apple-darwin
       - name: Build for Intel
         run: cargo build --release -p squint --target x86_64-apple-darwin
+      # With the signing secrets, the Developer ID certificate goes into a
+      # keychain of its own for this run; without them (a fork's pull
+      # request, or a repository not set up yet) the app is signed ad hoc.
+      - name: Import the signing certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE" ]; then
+            if [ "${{ github.event_name }}" = release ]; then
+              echo "::warning::MACOS_CERTIFICATE is not set: this release's macOS app is not signed with a Developer ID or notarized"
+            fi
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)"
+          if [ -z "$identity" ]; then
+            security find-identity -v -p codesigning "$keychain"
+            echo "::error::MACOS_CERTIFICATE holds no Developer ID Application identity"
+            exit 1
+          fi
+          echo "Signing as $identity"
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
       - name: Package
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           packaging/macos/package.sh "$VERSION" \
             target/aarch64-apple-darwin/release/squint \
@@ -145,6 +193,11 @@ jobs:
           name: macos
           path: dist/*
           if-no-files-found: error
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          if [ -f "$keychain" ]; then security delete-keychain "$keychain"; fi
 
   windows:
     needs: version

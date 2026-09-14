@@ -24,11 +24,12 @@ built by [`release.yml`](.github/workflows/release.yml) when it is published:
 | Arch | `.pkg.tar.zst` — `sudo pacman -U squint-bin-*.pkg.tar.zst` |
 | Any Linux | `.AppImage`, or a `.tar.gz` to unpack over `/usr/local` |
 
-The macOS app and the Windows installer are not signed with a paid
-certificate. On Windows, SmartScreen's More info → Run anyway lets the
-installer through. On macOS the first launch says squint.app is "Not Opened";
-after Done, System Settings → Privacy & Security → Open Anyway lets it
-through, or drop the download's quarantine before the first launch:
+The macOS app is signed with a Developer ID and notarized by Apple, and opens
+like any other. The Windows installer is not signed, so SmartScreen's More
+info → Run anyway lets it through. Releases up to 0.1.1 have an unsigned
+macOS app as well, which the first launch says is "Not Opened"; after Done,
+System Settings → Privacy & Security → Open Anyway lets it through, or drop
+the download's quarantine before the first launch:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/squint.app
