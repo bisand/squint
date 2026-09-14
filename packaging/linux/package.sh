@@ -29,6 +29,9 @@ name="squint-$version-linux-$arch"
 # One tree laid out as /usr, which every package below is made from.
 stage="$work/stage"
 install -Dm755 "$binary" "$stage/usr/bin/squint"
+# The release profile keeps symbols for profiling; a package has no use for
+# them, and they are most of its weight.
+strip "$stage/usr/bin/squint"
 install -Dm644 "$here/squint.desktop" "$stage/usr/share/applications/squint.desktop"
 install -Dm644 "$root/packaging/icons/squint-256.png" "$stage/usr/share/icons/hicolor/256x256/apps/squint.png"
 install -Dm644 "$root/packaging/icons/squint.png" "$stage/usr/share/icons/hicolor/1024x1024/apps/squint.png"
