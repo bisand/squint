@@ -25,9 +25,16 @@ built by [`release.yml`](.github/workflows/release.yml) when it is published:
 | Any Linux | `.AppImage`, or a `.tar.gz` to unpack over `/usr/local` |
 
 The macOS app and the Windows installer are not signed with a paid
-certificate, so the first launch needs a right click → Open on macOS, and
-More info → Run anyway on Windows. `SHA256SUMS.txt` beside the packages
-checks what was downloaded.
+certificate. On Windows, SmartScreen's More info → Run anyway lets the
+installer through. On macOS the first launch says squint.app is "Not Opened";
+after Done, System Settings → Privacy & Security → Open Anyway lets it
+through, or drop the download's quarantine before the first launch:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/squint.app
+```
+
+`SHA256SUMS.txt` beside the packages checks what was downloaded.
 
 To make one, tag a semver version and publish a release on it:
 
