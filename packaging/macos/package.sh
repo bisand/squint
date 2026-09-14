@@ -36,7 +36,7 @@ fi
 # rejection, prints Apple's log of why before failing.
 notarize() {
   local file="$1" result id status
-  result="$(xcrun notarytool submit "$file" "${auth[@]}" --wait --timeout 30m --output-format json)"
+  result="$(xcrun notarytool submit "$file" "${auth[@]}" --wait --timeout 2h --output-format json)"
   echo "$result"
   id="$(plutil -extract id raw -o - - <<< "$result")"
   status="$(plutil -extract status raw -o - - <<< "$result")"
