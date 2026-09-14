@@ -20,7 +20,7 @@ mod settings_window;
 mod stamp;
 mod switcher;
 
-use denise_winit::{Error, Present, run_with};
+use denise_winit::{Present, run_with};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -108,45 +108,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|a| std::fs::canonicalize(a).unwrap_or_else(|_| PathBuf::from(a)));
 
     // The GPU paces frames to the display; the software rasteriser is the
-    // fallback for a machine with nothing that can present, and an override
-    // so the two can be compared.
+    // fallback for a machine with nothing that can present, taken by DeniseUI
+    // as the window opens — winit allows one event loop a process, so it
+    // cannot be a second run — and an override so the two can be compared.
     let present = match std::env::var("SQUINT_PRESENT").as_deref() {
         Ok("software") => Present::Software,
-        _ => Present::Gpu,
+        Ok("gpu") => Present::Gpu,
+        _ => Present::GpuOrSoftware,
     };
     let menus = app::Menus::for_platform();
     // Where the last run left the window, before there is a window to ask.
     let window = app::Remembered::window();
-    let open_path = path.clone();
     let open = move |size, scale| {
         app::App::new(
             size,
             scale,
-            open_path.as_deref(),
+            path.as_deref(),
             menus,
             app::Remembered::load(),
             present,
         )
     };
-    match run_with(app::App::config(present, window), open) {
-        Err(Error::Gpu(reason) | Error::Present(reason)) if present == Present::Gpu => {
-            eprintln!("squint: cannot draw through the GPU ({reason}); drawing in software");
-            let open = move |size, scale| {
-                app::App::new(
-                    size,
-                    scale,
-                    path.as_deref(),
-                    menus,
-                    app::Remembered::load(),
-                    Present::Software,
-                )
-            };
-            run_with(app::App::config(Present::Software, window), open)?;
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-        Ok(()) => Ok(()),
-    }
+    run_with(app::App::config(present, window), open)?;
+    Ok(())
 }
 
 /// Draws one frame into a PPM file, with no window and no event loop.

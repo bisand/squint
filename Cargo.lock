@@ -625,18 +625,18 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "denise"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31753b1d08c32836a2c6cc9a7e8bdd7d4cd890f0fc081d8eabbc901d2c2856b7"
+checksum = "5ad1f5a50f2facaee11dad6cbd54788ad0c78ace3d924587edc82d92c1eecb63"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "denise-macos"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee4b7977276acd519f77574b874c6b2972d7dd67e1f419c581234a2c5b3de1da"
+checksum = "ef7fad5e4ba4c48a88a32f5f821c75dd593f44fffe21a8e19a2df736c1451bec"
 dependencies = [
  "denise",
  "objc2 0.6.4",
@@ -651,18 +651,18 @@ dependencies = [
 
 [[package]]
 name = "denise-render"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f793959eacdf677f42b538099129a5607dde74407850886cc1f1f71a01115d3"
+checksum = "8cc052ab0391332cfe937fa19328d38074a1be42686c327ac9243d326be7db48"
 dependencies = [
  "denise",
 ]
 
 [[package]]
 name = "denise-text"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e21d602ae3a21a0a815e739012ac133ee57e6f919f4a699c942b148b646fe3"
+checksum = "dd1c86dabc55950624c5fb8adaa1c720858390de8d3cd026e0346bd3bf1badf7"
 dependencies = [
  "denise",
  "denise-render",
@@ -671,9 +671,9 @@ dependencies = [
 
 [[package]]
 name = "denise-ui"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "507724025fb764d017c7c969f604bbe95b3098382a1f75c55750a71b00f8d5f2"
+checksum = "3c922449468d35f2f7138263d46aa3ba56055824d9dd0a8035e91666115755e9"
 dependencies = [
  "denise",
  "denise-render",
@@ -683,9 +683,9 @@ dependencies = [
 
 [[package]]
 name = "denise-wgpu"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b746373196a482ace0670234d4e30efd87e8b7aa88ba566d9d89e9e923041e4"
+checksum = "d5b38c6d70afcce7d358cb6f4223f13139b580b9ca917d5ebd9a276b6bb3d08d"
 dependencies = [
  "bytemuck",
  "denise",
@@ -696,9 +696,9 @@ dependencies = [
 
 [[package]]
 name = "denise-winit"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed81fa3e4acc4ccf7231176b83f0ca994d0bc368f515f6b09c6807f2a8c6e3b8"
+checksum = "f8432748b82d1eb9c156135988c3528b07f3142d3d8306a4b440b99f05657cdd"
 dependencies = [
  "denise",
  "denise-macos",
