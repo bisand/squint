@@ -59,6 +59,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+/// What the desktop knows squint's windows by: Wayland's app_id and X11's
+/// class, and the name of the desktop entry, so the two are matched.
+pub const APP_ID: &str = "squint";
+
 /// Bytes indexed per step: a few milliseconds from the page cache.
 const INDEX_SLICE: usize = 8 * 1024 * 1024;
 
@@ -380,6 +384,7 @@ impl App {
             position: window.and_then(|w| w.at).map(|at| Point::new(at.x, at.y)),
             maximized: window.is_some_and(|w| w.maximized),
             present,
+            app_id: Some(APP_ID.into()),
             ..WindowConfig::default()
         }
     }
@@ -3140,6 +3145,13 @@ mod tests {
         assert_eq!(config.size, Size::new(1000, 700));
         assert_eq!(config.position, None);
         assert!(!config.maximized);
+    }
+
+    /// The window says whose it is, by the name of squint's desktop entry.
+    #[test]
+    fn the_window_is_known_by_the_desktop_entry() {
+        let config = App::config(Present::Software, None);
+        assert_eq!(config.app_id.as_deref(), Some("squint"));
     }
 
     /// The settings file is what the window is: its theme, its text, its tab

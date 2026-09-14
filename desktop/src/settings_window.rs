@@ -89,6 +89,7 @@ impl SettingsWindow {
             title: "Settings".into(),
             size: SIZE,
             present,
+            app_id: Some(crate::app::APP_ID.into()),
             ..WindowConfig::default()
         };
         WindowRequest::new(config, move |size, scale| {
@@ -305,6 +306,19 @@ mod tests {
             other => panic!("expected the settings, got {other:?}"),
         }
         assert_eq!(said[1], Word::Closed);
+    }
+
+    /// The settings window belongs to squint as far as the desktop can tell,
+    /// not to an application of its own.
+    #[test]
+    fn the_settings_window_is_squints() {
+        let request = SettingsWindow::request(
+            Settings::default(),
+            None,
+            Arc::new(Link::default()),
+            Present::Software,
+        );
+        assert_eq!(request.config.app_id.as_deref(), Some(crate::app::APP_ID));
     }
 
     /// Cancel hands nothing over, and closing puts the editor back.
