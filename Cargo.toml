@@ -6,3 +6,11 @@ members = ["core", "desktop"]
 debug = 1          # keep symbols for profiling the document engine
 lto = "thin"
 codegen-units = 1
+
+# Temporary: DeniseUI's lazy TrueType faces, resting caret and loop waker,
+# until they are released.
+[patch.crates-io]
+denise = { path = "../denise-idle/denise" }
+denise-text = { path = "../denise-idle/denise-text" }
+denise-ui = { path = "../denise-idle/denise-ui" }
+denise-winit = { path = "../denise-idle/denise-winit" }

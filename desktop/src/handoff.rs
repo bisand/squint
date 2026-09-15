@@ -13,18 +13,18 @@
 //! Whatever arrives waits in a queue the window takes from between frames, as
 //! do the files macOS hands over by Apple Event (see `open_documents`).
 
+use denise_winit::Waker;
 use interprocess::local_socket::{ListenerOptions, Name, Stream, prelude::*};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 /// Files waiting for the window, oldest first.
 static OPENED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-/// Whether this squint is the one others hand their files to.
-static LISTENING: AtomicBool = AtomicBool::new(false);
+/// Wakes the window when files arrive, once there is a window to wake.
+static WAKER: OnceLock<Waker> = OnceLock::new();
 
 /// What a message starts with, so a stray connection is not read as files.
 const MAGIC: &[u8] = b"squint-open-1\0";
@@ -32,11 +32,20 @@ const MAGIC: &[u8] = b"squint-open-1\0";
 /// More than any list of files anybody drops on an icon.
 const MOST: u64 = 1 << 20;
 
-/// Adds files for the window to open.
+/// Adds files for the window to open, and wakes it to open them.
 pub fn push(paths: impl IntoIterator<Item = PathBuf>) {
     if let Ok(mut opened) = OPENED.lock() {
         opened.extend(paths);
     }
+    if let Some(waker) = WAKER.get() {
+        waker.wake();
+    }
+}
+
+/// How to wake the window when files arrive. Files that came before it are
+/// taken up by the window's first frame.
+pub fn wake_with(waker: Waker) {
+    let _ = WAKER.set(waker);
 }
 
 /// The files waiting to be opened, oldest first.
@@ -45,12 +54,6 @@ pub fn take() -> Vec<PathBuf> {
         .lock()
         .map(|mut opened| std::mem::take(&mut *opened))
         .unwrap_or_default()
-}
-
-/// Whether files can arrive from another squint, which nothing wakes the
-/// window for: the window looks now and then while this is so.
-pub fn listening() -> bool {
-    LISTENING.load(Ordering::Relaxed)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,7 +101,6 @@ fn claim_at(address: &Address, paths: &[PathBuf]) -> Claim {
         return Claim::Run;
     };
     address.restrict();
-    LISTENING.store(true, Ordering::Relaxed);
     thread::Builder::new()
         .name("handoff".into())
         .spawn(move || {
@@ -217,7 +219,6 @@ mod tests {
         let files = [PathBuf::from("/tmp/a b.log"), PathBuf::from("/tmp/ü.json")];
 
         assert_eq!(claim_at(&address, &[]), Claim::Run, "the first runs");
-        assert!(listening());
         let mode = std::fs::metadata(dir.path().join("open.sock")).unwrap();
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(mode.permissions().mode() & 0o777, 0o600);

@@ -42,7 +42,7 @@ use denise_ui::widgets::{
     open_menu, open_menu_at, shortcut, tab_rect,
 };
 use denise_ui::{Anchors, NodeId, Ui};
-use denise_winit::{DeniseApp, Present, WindowConfig, WindowRequest};
+use denise_winit::{DeniseApp, Present, Waker, WindowConfig, WindowRequest};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use squint_core::editorconfig::{self, Properties};
 use squint_core::format::{self, Format, Kind, Style};
@@ -78,14 +78,6 @@ const FORMAT_THREAD_SLICE: usize = 16 * 1024 * 1024;
 
 /// How long one frame may spend walking the file, indexing or finding.
 const SLICE_TIME: Duration = Duration::from_millis(6);
-
-/// How often the editor looks at what the settings window has said, while
-/// there is one open.
-const HEAR_SETTINGS: Duration = Duration::from_millis(50);
-
-/// How often the editor looks for files another squint has handed it. Soon
-/// enough after a double-click, and rare enough to cost nothing idle.
-const HEAR_HANDOFF: Duration = Duration::from_millis(250);
 
 /// The sizes Zoom In and Zoom Out step through. Zoom starts from the size the
 /// settings give, and ⌘0 comes back to it.
@@ -144,6 +136,25 @@ impl Remembered {
             recent: Recent::load(),
             settings: Kept::load(settings::FILE),
             session: Kept::load(session::FILE),
+        }
+    }
+
+    /// How to draw the window: the GPU where one can, unless the last run of
+    /// this version found none could, or `SQUINT_PRESENT` says otherwise.
+    ///
+    /// Read on its own and before [`load`](Self::load), as the window is.
+    pub fn present() -> Present {
+        match std::env::var("SQUINT_PRESENT").as_deref() {
+            Ok("software") => Present::Software,
+            Ok("gpu") => Present::Gpu,
+            _ => {
+                let session = Kept::<Session>::load(session::FILE);
+                if session.get().gpu_failed_in.as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+                    Present::Software
+                } else {
+                    Present::GpuOrSoftware
+                }
+            }
         }
     }
 
@@ -318,8 +329,10 @@ pub struct App {
     /// Windows asked for and not yet opened: the runner takes them.
     windows: Vec<WindowRequest>,
     /// How this window is drawn, so one opened beside it is drawn the same
-    /// way.
+    /// way: what was asked for until the window opens, and what it got after.
     present: Present,
+    /// Wakes this window's loop from another thread, once it runs.
+    waker: Option<Waker>,
     /// Where the settings are kept, for the settings window to say and for
     /// Edit the File… to open.
     settings_file: Option<PathBuf>,
@@ -515,6 +528,7 @@ impl App {
             settings: None,
             windows: Vec::new(),
             present,
+            waker: None,
             settings_file: memory_file,
             faces,
             watch: Duration::from_secs(settings.general.watch_seconds as u64),
@@ -1061,6 +1075,7 @@ impl App {
             });
         }
         session.window = Some(self.place);
+        session.gpu_failed_in = self.memory.session.get().gpu_failed_in.clone();
         if session != *self.memory.session.get() {
             self.memory.session.set(session);
         }
@@ -1783,7 +1798,7 @@ impl App {
             self.say("the settings window is already open".into());
             return;
         }
-        let link = Arc::new(Link::default());
+        let link = Arc::new(Link::new(self.waker.clone()));
         self.windows.push(SettingsWindow::request(
             self.memory.settings.get().clone(),
             self.settings_file.clone(),
@@ -3004,6 +3019,26 @@ impl DeniseApp for App {
         Some(&self.title)
     }
 
+    fn set_waker(&mut self, waker: Waker) {
+        crate::handoff::wake_with(waker.clone());
+        self.waker = Some(waker);
+    }
+
+    fn presenting(&mut self, present: Present) {
+        // Kept only when it was left to the machine: a run told how to draw by
+        // `SQUINT_PRESENT` has learnt nothing about what the machine can do.
+        if self.present == Present::GpuOrSoftware {
+            let failed =
+                (present == Present::Software).then(|| env!("CARGO_PKG_VERSION").to_string());
+            if self.memory.session.get().gpu_failed_in != failed {
+                self.memory
+                    .session
+                    .update(|session| session.gpu_failed_in = failed);
+            }
+        }
+        self.present = present;
+    }
+
     fn next_frame_in(&self) -> Option<Duration> {
         let doc = self.editor_ref().document();
         if !doc.is_indexed()
@@ -3028,17 +3063,9 @@ impl DeniseApp for App {
         let files = self
             .watching()
             .then(|| self.watch.saturating_sub(self.last_check.elapsed()));
-        // And, while the settings window is open, often enough to hear it: the
-        // two windows have their own frames and no way to wake each other, so
-        // an editor asleep on input would not take up a Save until something
-        // happened to it.
-        let settings = self.settings.is_some().then_some(HEAR_SETTINGS);
-        // And for files another squint hands over, for the same reason.
-        let handoff = crate::handoff::listening().then_some(HEAR_HANDOFF);
-        [animation, files, settings, handoff]
-            .into_iter()
-            .flatten()
-            .min()
+        // The settings window and another squint handing over files wake the
+        // loop themselves when they have something: see `set_waker`.
+        [animation, files].into_iter().flatten().min()
     }
 }
 
@@ -3067,6 +3094,40 @@ mod tests {
             },
             Present::Software,
         )
+    }
+
+    /// A window left to find its own way of drawing remembers that the GPU
+    /// could not, and forgets it once the GPU could; one told how to draw
+    /// remembers nothing. Writing down the tabs keeps what was learnt.
+    #[test]
+    fn a_gpu_that_could_not_draw_is_remembered_until_one_can() {
+        let learn = |asked, got| {
+            let mut app = window(Kept::in_memory(Settings::default()));
+            app.present = asked;
+            app.presenting(got);
+            assert_eq!(
+                app.present, got,
+                "a window opened beside it draws the same way"
+            );
+            app.remember_tabs();
+            app.memory.session.get().gpu_failed_in.clone()
+        };
+        let this = Some(env!("CARGO_PKG_VERSION").to_string());
+        assert_eq!(learn(Present::GpuOrSoftware, Present::Software), this);
+        assert_eq!(learn(Present::GpuOrSoftware, Present::Gpu), None);
+        assert_eq!(learn(Present::Software, Present::Software), None);
+
+        let mut app = window(Kept::in_memory(Settings::default()));
+        app.memory
+            .session
+            .update(|s| s.gpu_failed_in = Some("0.0.1".into()));
+        app.present = Present::GpuOrSoftware;
+        app.presenting(Present::Gpu);
+        assert_eq!(
+            app.memory.session.get().gpu_failed_in,
+            None,
+            "a driver arrived"
+        );
     }
 
     /// What the window system says the window is doing, in the order and the

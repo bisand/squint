@@ -16,7 +16,7 @@ use crate::settings_form::{Form, FormMsg, Outcome};
 use denise::{BufferAge, DamageTracker, ElementState, Frame, InputEvent, KeyCode, Pen, Rect, Size};
 use denise_text::TextStyle;
 use denise_ui::Ui;
-use denise_winit::{DeniseApp, Modality, Present, WindowConfig, WindowRequest};
+use denise_winit::{DeniseApp, Modality, Present, Waker, WindowConfig, WindowRequest};
 use rfd::FileDialog;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -50,13 +50,27 @@ pub enum Word {
 #[derive(Default)]
 pub struct Link {
     said: Mutex<Vec<Word>>,
+    /// The editor's loop, woken for each thing said: the two windows have
+    /// frames of their own, and an editor asleep on input would not take up a
+    /// Save until something happened to it.
+    waker: Option<Waker>,
 }
 
 impl Link {
+    pub fn new(waker: Option<Waker>) -> Self {
+        Self {
+            said: Mutex::default(),
+            waker,
+        }
+    }
+
     /// Says one thing to the editor, to be heard on its next frame.
     pub fn say(&self, word: Word) {
         if let Ok(mut said) = self.said.lock() {
             said.push(word);
+        }
+        if let Some(waker) = &self.waker {
+            waker.wake();
         }
     }
 

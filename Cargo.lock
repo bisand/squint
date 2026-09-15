@@ -9,6 +9,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
 dependencies = [
  "ab_glyph_rasterizer",
+ "libm",
  "owned_ttf_parser",
 ]
 
@@ -17,6 +18,9 @@ name = "ab_glyph_rasterizer"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "adler2"
@@ -625,18 +629,14 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "denise"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "390af05070a757159815e6c333caa40336418b0a3806cf26dd9a78d4d6cf80b4"
+version = "0.29.1"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "denise-macos"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4be9b8ccc048e94aa14f169b02fdfdafb82b3c30cbbef1c418c04d0c9a608db"
+version = "0.29.1"
 dependencies = [
  "denise",
  "objc2 0.6.4",
@@ -651,29 +651,23 @@ dependencies = [
 
 [[package]]
 name = "denise-render"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c47791ba994143bad9fcc8f3a35252ddf2d952d9cfbe70c8a8df3536627d44cf"
+version = "0.29.1"
 dependencies = [
  "denise",
 ]
 
 [[package]]
 name = "denise-text"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36cd32324bd821c017aa5be4c939e7ff17343ed2a85a656e3c97730f185bb30d"
+version = "0.29.1"
 dependencies = [
+ "ab_glyph",
  "denise",
  "denise-render",
- "fontdue",
 ]
 
 [[package]]
 name = "denise-ui"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd7d340cb30a26241a2b6d68fc0dedaf691e3271e4ca9f991fad8c8630184d5e"
+version = "0.29.1"
 dependencies = [
  "denise",
  "denise-render",
@@ -683,9 +677,7 @@ dependencies = [
 
 [[package]]
 name = "denise-wgpu"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9baeb08870b099e5c8fab6ded4fc058e61eedbc98a73b64ec1f7d8666e61a1ba"
+version = "0.29.1"
 dependencies = [
  "bytemuck",
  "denise",
@@ -696,9 +688,7 @@ dependencies = [
 
 [[package]]
 name = "denise-winit"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b98f327509c917a0d673e0625a1d341884def133f8a800e80712138a69a9c7f7"
+version = "0.29.1"
 dependencies = [
  "denise",
  "denise-macos",
@@ -968,25 +958,9 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-
-[[package]]
-name = "fontdue"
-version = "0.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7894823fa221401399e2598f8b63f81ac77ff5c63248b7656779bff1632d7d3d"
-dependencies = [
- "hashbrown 0.15.5",
- "ttf-parser",
-]
 
 [[package]]
 name = "foreign-types"
@@ -1194,24 +1168,13 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.15.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.1.5",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash 0.2.0",
+ "foldhash",
 ]
 
 [[package]]
@@ -1220,7 +1183,7 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "foldhash 0.2.0",
+ "foldhash",
 ]
 
 [[package]]

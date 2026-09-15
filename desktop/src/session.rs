@@ -19,6 +19,12 @@ pub struct Session {
     /// that wrote one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<Window>,
+    /// The version of squint that found no GPU able to draw its window here,
+    /// so the runs after it draw in software from the start instead of loading
+    /// the graphics drivers to find out again. A new version tries again: it
+    /// is the likeliest time for the drivers to have changed too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_failed_in: Option<String>,
 }
 
 /// The window as a run left it, so the next one opens the same way.
@@ -166,6 +172,7 @@ mod tests {
                 at: Some(Spot { x: -1920, y: 40 }),
                 maximized: false,
             }),
+            gpu_failed_in: Some("0.1.0".into()),
         };
         let json = serde_json::to_string(&session).expect("json");
         assert!(json.contains(r#""color":"teal""#), "{json}");

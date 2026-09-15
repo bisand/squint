@@ -155,7 +155,7 @@ fn file_called(want: &str) -> Option<PathBuf> {
 fn read(path: &Path) -> Option<(String, Box<dyn GlyphSource>)> {
     let name = path.display().to_string();
     let bytes = std::fs::read(path).ok()?;
-    let source = TrueTypeSource::from_bytes(&name, &bytes).ok()?;
+    let source = TrueTypeSource::from_vec(&name, bytes).ok()?;
     Some((name, Box::new(source)))
 }
 

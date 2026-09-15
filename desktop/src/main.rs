@@ -125,12 +125,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The GPU paces frames to the display; the software rasteriser is the
     // fallback for a machine with nothing that can present, taken by DeniseUI
     // as the window opens — winit allows one event loop a process, so it
-    // cannot be a second run — and an override so the two can be compared.
-    let present = match std::env::var("SQUINT_PRESENT").as_deref() {
-        Ok("software") => Present::Software,
-        Ok("gpu") => Present::Gpu,
-        _ => Present::GpuOrSoftware,
-    };
+    // cannot be a second run — and remembered, so the next run does not pay
+    // to find out again.
+    let present = app::Remembered::present();
     let menus = app::Menus::for_platform();
     // Where the last run left the window, before there is a window to ask.
     let window = app::Remembered::window();
