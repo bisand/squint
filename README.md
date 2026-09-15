@@ -17,7 +17,7 @@ built by [`release.yml`](.github/workflows/release.yml) when it is published:
 
 | | |
 |---|---|
-| macOS (Apple silicon and Intel) | `.dmg` with `squint.app`, or the bare binary in a `.tar.gz` |
+| macOS (Apple silicon and Intel) | `brew trust --tap bisand/tap`, then `brew install --cask bisand/tap/squint`, which puts `squint` on the PATH too; or the `.dmg` with `squint.app`, or the bare binary in a `.tar.gz` |
 | Windows (x64, ARM64) | `-setup.exe` installer, or a `.zip` |
 | Debian, Ubuntu, Mint | `.deb` — `sudo apt install ./squint_*.deb` |
 | Fedora, RHEL, openSUSE | `.rpm` — `sudo dnf install ./squint-*.rpm` |

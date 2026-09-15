@@ -21,6 +21,9 @@
 #   APP_STORE_CONNECT_KEY_ID    that key's ID, the part of its file name
 #                               after AuthKey_
 #   APP_STORE_CONNECT_ISSUER_ID the issuer ID shown above the team's keys
+#
+# A release that is not a pre-release then updates the Homebrew cask in
+# bisand/homebrew-tap, when HOMEBREW_TAP_TOKEN is set (see the homebrew job).
 name: release
 
 on:
@@ -275,3 +278,44 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber --repo "${{ github.repository }}"
+
+  # Points the cask in bisand/homebrew-tap at this release. Pushing to another
+  # repository takes a token of its own: a fine-grained token with Contents
+  # read and write on bisand/homebrew-tap, as the HOMEBREW_TAP_TOKEN secret.
+  homebrew:
+    needs: [version, publish]
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Update the cask
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set: the Homebrew cask still points at the previous release"
+            exit 0
+          fi
+          dmg="squint-$VERSION-macos-universal.dmg"
+          gh release download "${{ github.event.release.tag_name }}" --repo "${{ github.repository }}" \
+            --pattern SHA256SUMS.txt
+          sha="$(awk -v f="$dmg" '$2 == f { print $1 }' SHA256SUMS.txt)"
+          if [ -z "$sha" ]; then
+            echo "::error::$dmg is not in SHA256SUMS.txt"
+            exit 1
+          fi
+          git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/bisand/homebrew-tap.git" tap
+          cd tap
+          sed -i -e "s/^  version \".*\"/  version \"$VERSION\"/" \
+                 -e "s/^  sha256 \".*\"/  sha256 \"$sha\"/" Casks/squint.rb
+          git diff
+          if git diff --quiet; then
+            echo "The cask is already at $VERSION"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "squint $VERSION"
+          git push
