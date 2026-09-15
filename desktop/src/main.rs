@@ -7,6 +7,7 @@
 
 mod app;
 mod config;
+mod defaults;
 mod document;
 mod fonts;
 mod handoff;

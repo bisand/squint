@@ -1404,6 +1404,15 @@ impl App {
                     self.say(format!("showing {}: {e}", path.display()));
                 }
             }
+            Command::AlwaysOpenWith => {
+                let path = self.tabs[self.active].path.clone();
+                if let Some(path) = path {
+                    match crate::defaults::make_default_for(&path) {
+                        Ok(done) => self.say(done),
+                        Err(why) => self.say(format!("not the default: {why}")),
+                    }
+                }
+            }
             Command::Settings => self.open_settings(),
             Command::Help => self.open_url(&format!("{}#readme", menu::HOME)),
             Command::ReportIssue => self.open_url(menu::ISSUES),

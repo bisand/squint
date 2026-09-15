@@ -18,6 +18,7 @@
 //! every control this built is kept in [`Form::controls`] and read back
 //! whenever anything happens. What is on screen is the draft, always.
 
+use crate::defaults::{self, Handler, KINDS, Support};
 use crate::fonts;
 use crate::settings::{
     Appearance, BUILT_IN_THEMES, CustomTheme, Editor, Formatting, General, Highlighting,
@@ -28,6 +29,8 @@ use denise_text::TextStyle;
 use denise_ui::widgets::{Button, Checkbox, Label, List, Panel, Select, TextInput};
 use denise_ui::{NodeId, Side, Ui};
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
 
 /// What the dialog says to the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +64,12 @@ pub enum Action {
     /// Picks a font file for the text, or for the chrome.
     ChooseTextFont,
     ChooseUiFont,
+    /// Makes squint the default for one of [`defaults::KINDS`].
+    MakeDefault(usize),
+    /// Makes squint the default for all of them.
+    MakeAllDefault,
+    /// Opens where the system chooses defaults, where only the user may.
+    OpenDefaultApps,
 }
 
 /// What the window should do about what just happened in the dialog.
@@ -80,12 +89,13 @@ pub enum Outcome {
 }
 
 /// The sections, in the order the list down the left shows them.
-pub const SECTIONS: [&str; 5] = [
+pub const SECTIONS: [&str; 6] = [
     "General",
     "Editor",
     "Appearance",
     "Highlighting",
     "Formatting",
+    "File Types",
 ];
 
 /// Which setting a control is for.
@@ -163,6 +173,12 @@ pub struct Form {
     /// The themes syntect has, read the first time they are shown: loading
     /// the grammars to list them would hold up the dialog opening.
     syntax_themes: Vec<String>,
+    /// What the last change to a default did, said under the file types.
+    /// Not a setting: the system keeps defaults, not `settings.json`.
+    defaults_note: Result<String, String>,
+    /// A change to the defaults being made on a thread: macOS takes a second
+    /// or two over each type, which the window should not wait on.
+    defaults_job: Option<mpsc::Receiver<Result<String, String>>>,
 }
 
 /// The message a checkbox sends. A fn pointer cannot say which checkbox it
@@ -204,6 +220,8 @@ impl Form {
             file,
             chrome,
             syntax_themes: Vec::new(),
+            defaults_note: Ok(String::new()),
+            defaults_job: None,
         };
         form.build(ui)?;
         Some(form)
@@ -323,6 +341,26 @@ impl Form {
             Action::EditFile => Some(Outcome::EditFile),
             Action::ChooseTextFont => Some(Outcome::PickFont { text: true }),
             Action::ChooseUiFont => Some(Outcome::PickFont { text: false }),
+            Action::MakeDefault(index) => {
+                if let Some(kind) = KINDS.get(index) {
+                    self.change_defaults(ui, move || defaults::make_default(kind));
+                }
+                None
+            }
+            Action::MakeAllDefault => {
+                self.change_defaults(ui, || {
+                    KINDS
+                        .iter()
+                        .try_for_each(|kind| defaults::make_default(kind).map(drop))
+                        .map(|()| "squint now opens all of them".into())
+                });
+                None
+            }
+            Action::OpenDefaultApps => {
+                self.defaults_note = defaults::open_system_settings();
+                self.rebuild(ui);
+                None
+            }
             Action::Restore => {
                 let themes = std::mem::take(&mut self.draft.appearance.custom_themes);
                 self.draft = Settings::default();
@@ -593,7 +631,8 @@ impl Form {
             1 => self.editor_page(ui),
             2 => self.appearance_page(ui),
             3 => self.highlighting_page(ui),
-            _ => self.formatting_page(ui),
+            4 => self.formatting_page(ui),
+            _ => self.file_types_page(ui),
         }
     }
 
@@ -894,6 +933,141 @@ impl Form {
             "",
             final_newline,
         );
+    }
+
+    /// Makes a change to the defaults on a thread, and shows it is under way.
+    fn change_defaults(
+        &mut self,
+        ui: &mut Ui<FormMsg>,
+        change: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) {
+        if self.defaults_job.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let started = thread::Builder::new()
+            .name("defaults".into())
+            .spawn(move || {
+                let _ = tx.send(change());
+            });
+        self.defaults_note = match started {
+            Ok(_) => {
+                self.defaults_job = Some(rx);
+                Ok("Changing…".into())
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        self.rebuild(ui);
+    }
+
+    /// Whether a change to the defaults is still being made.
+    pub fn busy(&self) -> bool {
+        self.defaults_job.is_some()
+    }
+
+    /// Takes up a change to the defaults that has finished, and shows what the
+    /// defaults are now.
+    pub fn poll(&mut self, ui: &mut Ui<FormMsg>) {
+        let Some(job) = &self.defaults_job else {
+            return;
+        };
+        let result = match job.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("the change stopped part way".into()),
+        };
+        self.defaults_job = None;
+        self.read(ui);
+        self.defaults_note = result;
+        if SECTIONS[self.section] == "File Types" {
+            self.rebuild(ui);
+        }
+    }
+
+    fn file_types_page(&mut self, ui: &mut Ui<FormMsg>) {
+        self.heading(ui, "Open with squint");
+        match defaults::support() {
+            Support::Direct => {
+                let mut all = true;
+                for (index, kind) in KINDS.iter().enumerate() {
+                    let handler = defaults::handler(kind);
+                    let now = match &handler {
+                        Handler::Squint => "squint opens them".to_string(),
+                        Handler::Other(app) => format!("{app} opens them"),
+                        Handler::Unknown => "nothing is chosen for them".to_string(),
+                    };
+                    all &= handler == Handler::Squint;
+                    let hint = format!("{} — {now}", kind.extensions);
+                    let at = self.row(ui, kind.name, &hint);
+                    self.button_at(
+                        ui,
+                        at,
+                        "Make Default",
+                        Action::MakeDefault(index),
+                        handler != Handler::Squint && !self.busy(),
+                    );
+                }
+                self.buttons(
+                    ui,
+                    &[(
+                        "Make squint the Default for All",
+                        Action::MakeAllDefault,
+                        !all && !self.busy(),
+                    )],
+                );
+            }
+            Support::SystemSettings => {
+                let at = self.row(
+                    ui,
+                    "Default apps",
+                    "Windows lets only you choose the app for a kind of file: pick squint there, under its file types.",
+                );
+                self.button_at(ui, at, "Open Default Apps…", Action::OpenDefaultApps, true);
+            }
+            Support::Unavailable(why) => {
+                self.row(ui, "Not from this squint", &why);
+            }
+        }
+        self.note(
+            ui,
+            "The Tools menu does this for the file in front, whatever kind it is.",
+        );
+        match self.defaults_note.clone() {
+            Ok(done) if !done.is_empty() => self.note(ui, &done),
+            Err(why) => self.note(ui, &format!("Not changed: {why}.")),
+            Ok(_) => {}
+        }
+    }
+
+    /// A line of its own across the page.
+    fn note(&mut self, ui: &mut Ui<FormMsg>, text: &str) {
+        let h = self.s(18);
+        ui.add(
+            self.page,
+            Label::new(text)
+                .with_size(self.px(11.0))
+                .with_role(Role::Neutral),
+            Rect::new(0, self.y, self.page_w, h),
+        );
+        self.y += h + self.s(4);
+    }
+
+    /// One button where a row's control goes.
+    fn button_at(
+        &mut self,
+        ui: &mut Ui<FormMsg>,
+        at: Rect,
+        label: &str,
+        action: Action,
+        enabled: bool,
+    ) {
+        let button = Button::new(label, FormMsg::Button(action))
+            .with_size(self.px(11.0))
+            .with_role(Role::Neutral);
+        let rect = Rect::new(at.x, at.y, at.width, self.s(24));
+        if let Some(node) = ui.add(self.page, button, rect) {
+            ui.set_enabled(node, enabled);
+        }
     }
 
     /// The faces offered for one kind of text: none, then the ones squint
@@ -1270,9 +1444,39 @@ mod tests {
         let mut form = form(&mut ui, &Settings::default());
         for name in SECTIONS {
             assert!(form.show_section(name, &mut ui), "{name}");
-            assert!(!form.controls.is_empty(), "{name} has no rows");
+            // File Types holds no settings: the system keeps defaults.
+            if name != "File Types" {
+                assert!(!form.controls.is_empty(), "{name} has no rows");
+            }
         }
         assert!(!form.show_section("Nothing Like It", &mut ui));
+        assert_eq!(form.draft(), &Settings::default());
+    }
+
+    /// A change to the defaults runs on a thread, and what it did is shown
+    /// when it is done.
+    #[test]
+    fn a_change_to_the_defaults_is_shown_when_it_is_done() {
+        let mut ui = tree();
+        let mut form = form(&mut ui, &Settings::default());
+        assert!(form.show_section("File Types", &mut ui));
+        let (go, wait) = mpsc::channel::<()>();
+        form.change_defaults(&mut ui, move || {
+            let _ = wait.recv();
+            Ok("squint now opens Logs".into())
+        });
+        assert!(form.busy());
+        form.change_defaults(&mut ui, || Err("a second at once".into()));
+        form.poll(&mut ui);
+        assert_eq!(form.defaults_note, Ok("Changing…".into()));
+        go.send(()).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while form.busy() && std::time::Instant::now() < until {
+            form.poll(&mut ui);
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!form.busy());
+        assert_eq!(form.defaults_note, Ok("squint now opens Logs".into()));
         assert_eq!(form.draft(), &Settings::default());
     }
 

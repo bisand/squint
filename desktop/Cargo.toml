@@ -34,9 +34,11 @@ tempfile = "3"
 # The menu bar is the system's on macOS; everywhere else it is DeniseUI's, in
 # the window.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
 muda = { version = "0.19", default-features = false }
 # To wake the window's loop when a menu row is chosen: see `native_menu::wake`.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
-# To hear the files Finder hands squint: see `open_documents`.
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSNotification", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow", "NSWorkspace"] }
+# To hear the files Finder hands squint, and to be the default for some: see
+# `open_documents` and `defaults`.
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSBundle", "NSError", "NSNotification", "NSString", "NSURL"] }

@@ -236,6 +236,7 @@ impl DeniseApp for SettingsWindow {
                 self.act(msg);
             }
         }
+        self.form.poll(&mut self.ui);
         self.form.resized(&mut self.ui);
         if self.ui.needs_paint() {
             let pending = self.ui.pending_damage();
@@ -273,9 +274,14 @@ impl DeniseApp for SettingsWindow {
 
     fn next_frame_in(&self) -> Option<Duration> {
         let now = self.started.elapsed().as_millis() as u64;
-        self.ui
+        let animation = self
+            .ui
             .next_wake_ms()
-            .map(|wake| Duration::from_millis(wake.saturating_sub(now)))
+            .map(|wake| Duration::from_millis(wake.saturating_sub(now)));
+        // A change to the defaults finishes on its thread, which cannot wake
+        // the window: it looks until it has.
+        let defaults = self.form.busy().then_some(Duration::from_millis(100));
+        [animation, defaults].into_iter().flatten().min()
     }
 }
 

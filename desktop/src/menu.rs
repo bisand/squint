@@ -60,6 +60,8 @@ pub enum Command {
     ReadOnly,
     CopyPath,
     Reveal,
+    /// Makes squint the application that opens files like the one in front.
+    AlwaysOpenWith,
     /// Opens the settings dialog.
     Settings,
     Help,
@@ -282,6 +284,7 @@ pub fn titles(state: &State, system: bool) -> Vec<Title> {
             Entry::Separator,
             item(CopyPath, "Copy File Path", "").when(state.has_file),
             item(Reveal, reveal_label(), "").when(state.has_file),
+            item(AlwaysOpenWith, always_open_label(), "").when(state.has_file),
         ],
     });
     if let Some(tools) = titles.last_mut() {
@@ -379,6 +382,15 @@ fn color_entries(state: &State) -> Vec<Entry> {
             .ticked(state.tab_color == Some(color))
     }));
     entries
+}
+
+/// Where only the user may choose the default, the row asks them to.
+fn always_open_label() -> &'static str {
+    if cfg!(windows) {
+        "Choose the App for This Kind of File…"
+    } else {
+        "Always Open This Kind of File with squint"
+    }
 }
 
 fn reveal_label() -> &'static str {

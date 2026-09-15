@@ -219,6 +219,14 @@ ones it opened with, so what Save writes is what it showed.
 - **Formatting** — what ⇧⌘F writes: whether the source's project's
   `.editorconfig` decides the layout, and the indent, line breaks and final
   newline used where it does not.
+- **File Types** — which application opens plain text, logs, JSON, XML,
+  YAML, CSV and Markdown, and Make Default to make it squint, one kind or
+  all of them. This is not in `settings.json`: the system keeps it. On macOS
+  squint.app sets it through NSWorkspace, and on Linux the packaged squint
+  sets it with `xdg-mime`; Windows lets only the user choose, so the page
+  opens Default apps there. Tools ▸ Always Open This Kind of File with squint
+  does the same for the file in front, whatever its kind — on Windows, by
+  asking Windows' own "How do you want to open this file?".
 
 Opening a *file* never opens a second window — squint is one editor window
 with a row of tabs, and more than one is the roadmap's third item rather than
