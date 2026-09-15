@@ -42,13 +42,15 @@ pub const KINDS: [FileKind; 7] = [
     },
     FileKind {
         name: "Logs",
-        types: &["public.log"],
+        // A `.log` file is `com.apple.log`, which Console claims, not the
+        // `public.log` it conforms to.
+        types: &["public.log", "com.apple.log"],
         mimes: &["text/x-log"],
         extensions: ".log",
     },
     FileKind {
         name: "JSON",
-        types: &["public.json"],
+        types: &["public.json", "public.ndjson"],
         mimes: &["application/json", "application/x-ndjson"],
         extensions: ".json .jsonl",
     },
@@ -233,11 +235,38 @@ mod imp {
             .unwrap_or_else(|| id.to_string())
     }
 
+    /// The types a kind's files have: the ones it names, and the ones macOS
+    /// gives its extensions, which can be more particular than those — and
+    /// are what a double-click goes by. A type macOS makes up for an extension
+    /// nothing declares is left out: squint cannot be the default for it.
+    fn types_of(kind: &FileKind) -> Vec<Retained<AnyObject>> {
+        let mut identifiers: Vec<String> = kind.types.iter().map(|t| t.to_string()).collect();
+        let mut types: Vec<Retained<AnyObject>> =
+            kind.types.iter().filter_map(|t| uttype(t)).collect();
+        for ext in kind.extensions.split_whitespace() {
+            let Some(t) = uttype_of_extension(ext.trim_start_matches('.')) else {
+                continue;
+            };
+            let identifier = identifier_of(&t);
+            if !identifier.starts_with("dyn.") && !identifiers.contains(&identifier) {
+                identifiers.push(identifier);
+                types.push(t);
+            }
+        }
+        types
+    }
+
+    fn identifier_of(uttype: &AnyObject) -> String {
+        // SAFETY: `-[UTType identifier]` returns a string.
+        let identifier: Retained<NSString> = unsafe { msg_send![uttype, identifier] };
+        identifier.to_string()
+    }
+
     pub fn handler(kind: &FileKind) -> Handler {
         let ours = bundle_id().map(|id| id.to_string().to_lowercase());
         let mut other = None;
-        for identifier in kind.types {
-            match uttype(identifier).and_then(|t| handler_of(&t)) {
+        for uttype in types_of(kind) {
+            match handler_of(&uttype) {
                 Some(id) if Some(id.to_string().to_lowercase()) == ours => {}
                 Some(id) => {
                     other.get_or_insert_with(|| app_name(&id));
@@ -289,10 +318,7 @@ mod imp {
         let Some(id) = bundle_id() else {
             return Err("only squint.app can be the default".into());
         };
-        for identifier in kind.types {
-            let Some(uttype) = uttype(identifier) else {
-                continue;
-            };
+        for uttype in types_of(kind) {
             set(&uttype, &id)
                 .map_err(|why| format!("macOS would not make squint open {}: {why}", kind.name))?;
         }
@@ -343,6 +369,26 @@ mod imp {
                 app_name(&NSString::from_str("com.apple.TextEdit")),
                 "TextEdit"
             );
+        }
+
+        /// What a double-click goes by is in what Make Default changes.
+        #[test]
+        fn a_kind_covers_the_types_its_extensions_have() {
+            let logs = super::super::KINDS
+                .iter()
+                .find(|k| k.name == "Logs")
+                .unwrap();
+            let names: Vec<String> = types_of(logs).iter().map(|t| identifier_of(t)).collect();
+            assert!(names.contains(&"com.apple.log".to_string()), "{names:?}");
+            for kind in &super::super::KINDS {
+                assert!(
+                    types_of(kind)
+                        .iter()
+                        .all(|t| !identifier_of(t).starts_with("dyn.")),
+                    "{}",
+                    kind.name
+                );
+            }
         }
 
         #[test]
