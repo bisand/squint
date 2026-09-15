@@ -83,6 +83,10 @@ const SLICE_TIME: Duration = Duration::from_millis(6);
 /// there is one open.
 const HEAR_SETTINGS: Duration = Duration::from_millis(50);
 
+/// How often the editor looks for files another squint has handed it. Soon
+/// enough after a double-click, and rare enough to cost nothing idle.
+const HEAR_HANDOFF: Duration = Duration::from_millis(250);
+
 /// The sizes Zoom In and Zoom Out step through. Zoom starts from the size the
 /// settings give, and ⌘0 comes back to it.
 const TEXT_SIZES: &[u16] = &[8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 32, 40, 48];
@@ -1452,7 +1456,8 @@ impl App {
                 .unwrap_or_default();
             #[cfg(not(target_os = "macos"))]
             let chosen: Vec<Command> = Vec::new();
-            if messages.is_empty() && chosen.is_empty() {
+            let opened = crate::handoff::take();
+            if messages.is_empty() && chosen.is_empty() && opened.is_empty() {
                 break;
             }
             acted = true;
@@ -1461,6 +1466,9 @@ impl App {
             }
             for command in chosen {
                 self.run(command);
+            }
+            for path in opened {
+                self.open_path(&path);
             }
         }
         acted
@@ -3016,7 +3024,12 @@ impl DeniseApp for App {
         // an editor asleep on input would not take up a Save until something
         // happened to it.
         let settings = self.settings.is_some().then_some(HEAR_SETTINGS);
-        [animation, files, settings].into_iter().flatten().min()
+        // And for files another squint hands over, for the same reason.
+        let handoff = crate::handoff::listening().then_some(HEAR_HANDOFF);
+        [animation, files, settings, handoff]
+            .into_iter()
+            .flatten()
+            .min()
     }
 }
 

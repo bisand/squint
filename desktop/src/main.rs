@@ -9,9 +9,12 @@ mod app;
 mod config;
 mod document;
 mod fonts;
+mod handoff;
 mod menu;
 #[cfg(target_os = "macos")]
 mod native_menu;
+#[cfg(target_os = "macos")]
+mod open_documents;
 mod recent;
 mod session;
 mod settings;
@@ -102,10 +105,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings_file,
         );
     }
-    let path: Option<PathBuf> = args
+    let mut paths: Vec<PathBuf> = args
         .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(|a| std::fs::canonicalize(a).unwrap_or_else(|_| PathBuf::from(a)));
+        .filter(|a| !a.starts_with('-'))
+        .map(|a| std::fs::canonicalize(a).unwrap_or_else(|_| PathBuf::from(a)))
+        .collect();
+    // A squint already running takes the files, in tabs of its window.
+    if handoff::claim(&paths) == handoff::Claim::HandedOver {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    open_documents::listen();
+    // The first file is opened with the window; the rest follow it in, as
+    // files handed over later do.
+    let path = (!paths.is_empty()).then(|| paths.remove(0));
+    handoff::push(paths);
 
     // The GPU paces frames to the display; the software rasteriser is the
     // fallback for a machine with nothing that can present, taken by DeniseUI

@@ -224,6 +224,19 @@ Opening a *file* never opens a second window — squint is one editor window
 with a row of tabs, and more than one is the roadmap's third item rather than
 a setting.
 
+That holds for files from outside too. A file double-clicked in Finder,
+Explorer or a Linux file manager, dropped on the Dock icon, or named to
+`squint` in a terminal while squint runs goes into a tab of the squint
+already open: the first squint listens on a socket only its user can reach,
+and a second one started with files hands them over and exits
+([`handoff.rs`](desktop/src/handoff.rs)). On macOS those files arrive as an
+Apple Event rather than on the command line
+([`open_documents.rs`](desktop/src/open_documents.rs)). squint declares the
+kinds of file it opens — text, logs, source, JSON, XML, YAML, CSV, Markdown —
+in the app bundle, in the desktop entry, and in the Windows installer, which
+lists it under Settings → Default apps, so it can be chosen as the app that
+opens them.
+
 ## Roadmap
 
 1. IME composition forwarded from winit into the text area.

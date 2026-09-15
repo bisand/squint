@@ -239,7 +239,7 @@ fn predefined(system: System) -> PredefinedMenuItem {
 /// enough to be drawn next. A redraw request would be the obvious nudge and is
 /// the wrong one: the view's own layer holds the frame, and a view asked to
 /// display itself draws over it.
-fn wake() {
+pub(crate) fn wake() {
     use objc2::runtime::{AnyObject, NSObjectProtocol};
     use objc2::{MainThreadMarker, msg_send, sel};
     use objc2_app_kit::NSApplication;

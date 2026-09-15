@@ -30,6 +30,7 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequiredOverridesAllowed=dialog
 ChangesEnvironment=yes
+ChangesAssociations=yes
 #if Arch == "arm64"
 ArchitecturesAllowed=arm64
 ArchitecturesInstallIn64BitMode=arm64
@@ -57,6 +58,68 @@ Root: HKA; Subkey: "Software\Classes\*\shell\squint"; ValueType: string; ValueNa
 Root: HKA; Subkey: "Software\Classes\*\shell\squint"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\squint.exe"""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\*\shell\squint\command"; ValueType: string; ValueName: ""; ValueData: """{app}\squint.exe"" ""%1"""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\squint.exe"" ""%1"""; Flags: uninsdeletekey
+; A file type of squint's own, which the extensions below name as one they
+; open with, and the registration that puts squint in Settings → Default apps.
+; Windows lets only the user choose the default; squint can only be offered.
+Root: HKA; Subkey: "Software\Classes\squint.file"; ValueType: string; ValueName: ""; ValueData: "Text file"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\squint.file\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\squint.exe"",0"
+Root: HKA; Subkey: "Software\Classes\squint.file\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\squint.exe"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "squint"
+Root: HKA; Subkey: "Software\squint"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\squint\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "squint"
+Root: HKA; Subkey: "Software\squint\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "Opens huge text files instantly, lets you look, tweak and save"
+Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "squint"; ValueData: "Software\squint\Capabilities"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".txt"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".txt"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.txt\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".log"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".log"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.log\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".out"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".out"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.out\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".csv"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".csv"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.csv\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".tsv"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".tsv"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.tsv\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".json"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".json"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.json\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".jsonl"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".jsonl"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.jsonl\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".ndjson"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".ndjson"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.ndjson\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".xml"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".xml"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.xml\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".yaml"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".yaml"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.yaml\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".yml"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".yml"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.yml\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".toml"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".toml"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.toml\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".ini"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".ini"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.ini\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".conf"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".conf"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.conf\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".cfg"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".cfg"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.cfg\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".md"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".md"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.md\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\squint\Capabilities\FileAssociations"; ValueType: string; ValueName: ".sql"; ValueData: "squint.file"
+Root: HKA; Subkey: "Software\Classes\Applications\squint.exe\SupportedTypes"; ValueType: string; ValueName: ".sql"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.sql\OpenWithProgids"; ValueType: string; ValueName: "squint.file"; ValueData: ""; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\squint.exe"; Description: "{cm:LaunchProgram,squint}"; Flags: nowait postinstall skipifsilent
