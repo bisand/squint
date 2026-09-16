@@ -14,17 +14,10 @@ path = "src/main.rs"
 squint-core = { path = "../core", features = ["syntax"] }
 # DeniseUI from crates.io, all four at the same version: two copies of
 # `denise` would be two types.
-denise = { version = "0.30.0", features = ["std"] }
-denise-text = { version = "0.30.0", features = ["truetype"] }
-denise-ui = { version = "0.30.0", features = ["std", "truetype"] }
-denise-winit = { version = "0.30.0", features = ["gpu"] }
-# Not called here. DeniseUI reads faces with ab_glyph and builds it without
-# its default features, which leaves out `variable-fonts`; naming it here
-# turns that back on for the copy DeniseUI uses, because Cargo unifies the
-# features of one crate across the tree. Without it macOS's own UI face,
-# SFNS.ttf, is a variable font whose outlines come back empty, and every
-# word of the window's chrome is drawn blank.
-ab_glyph = "0.2.32"
+denise = { version = "0.30.1", features = ["std"] }
+denise-text = { version = "0.30.1", features = ["truetype"] }
+denise-ui = { version = "0.30.1", features = ["std", "truetype"] }
+denise-winit = { version = "0.30.1", features = ["gpu"] }
 arboard = { version = "3", default-features = false }
 # The platform's open, save and question dialogs.
 rfd = "0.15"
