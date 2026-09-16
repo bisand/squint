@@ -6,7 +6,7 @@
 //! choose from.
 
 use denise_text::{GlyphSource, TrueTypeSource};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -136,32 +136,40 @@ pub fn load_named(name: &str) -> Option<(String, Box<dyn GlyphSource>)> {
 
 /// The faces of `preferred` this machine has and can draw in, by the name the
 /// settings name them: the file's name without `.ttf`.
-///
-/// Only [`MONO`] and [`UI`] are asked for, which is what [`drawable`] holds.
 pub fn choices(preferred: &[&str]) -> Vec<String> {
     preferred
         .iter()
-        .filter(|want| file_called(want).is_some_and(|path| drawable().contains(&path)))
+        .filter(|want| file_called(want).is_some_and(|path| drawable(&path)))
         .map(|want| stem_of(want))
         .collect()
 }
 
-/// Which of the faces squint looks for by itself this machine has and can
-/// draw in, found once.
+/// Whether anything can be drawn in the face at `path`.
 ///
 /// Finding out costs reading the file, and the settings form asks again every
-/// time one of its rows changes, so the answer is kept. Opening a window does
-/// not ask — [`load`] reads the faces it needs and no others — so a squint
-/// that never opens the settings never pays for this.
-fn drawable() -> &'static HashSet<PathBuf> {
-    static DRAWABLE: OnceLock<HashSet<PathBuf>> = OnceLock::new();
-    DRAWABLE.get_or_init(|| {
+/// time one of its rows changes, so the faces squint looks for by itself are
+/// settled once, between them, the first time any of them is asked about. A
+/// face outside those lists is read where it is asked for, so this is right
+/// for any list and quick for the ones the settings actually offer.
+///
+/// Opening a window does not ask — [`load`] reads the faces it needs and no
+/// others — so a squint that never opens the settings never pays for this.
+fn drawable(path: &Path) -> bool {
+    static KNOWN: OnceLock<HashMap<PathBuf, bool>> = OnceLock::new();
+    let known = KNOWN.get_or_init(|| {
         MONO.iter()
             .chain(UI)
             .filter_map(|want| file_called(want))
-            .filter(|path| read(path).is_some())
+            .map(|path| {
+                let draws = read(&path).is_some();
+                (path, draws)
+            })
             .collect()
-    })
+    });
+    known
+        .get(path)
+        .copied()
+        .unwrap_or_else(|| read(path).is_some())
 }
 
 fn stem_of(file: &str) -> String {
@@ -312,6 +320,28 @@ mod tests {
                 assert!(load_named(&name).is_some(), "{name}");
             }
         }
+    }
+
+    /// A face squint does not look for by itself is answered for like any
+    /// other. What is kept between asks is a shortcut past reading the file,
+    /// not the whole of what can be offered, and a list of other faces once
+    /// came back empty for want of being in it.
+    #[test]
+    fn a_face_outside_the_lists_squint_looks_for_is_still_offered() {
+        let looked_for = |name: &str| {
+            MONO.iter()
+                .chain(UI)
+                .any(|want| stem_of(want).eq_ignore_ascii_case(name))
+        };
+        // A face this machine has, is not on either list, and can be drawn in.
+        // A machine with no such face has nothing to check.
+        let Some(other) = installed_names()
+            .iter()
+            .find(|name| !looked_for(name) && load_named(name).is_some())
+        else {
+            return;
+        };
+        assert_eq!(choices(&[other.as_str()]), vec![other.clone()], "{other}");
     }
 
     /// A file that is not a face is not one to draw in, and a list of faces is
