@@ -212,6 +212,30 @@ mod tests {
         }
     }
 
+    /// The faces squint draws in have ink in them.
+    ///
+    /// A face can parse, and report a glyph for `a`, and still rasterise to
+    /// nothing at all: macOS's own UI face, SFNS.ttf, is a variable font, and
+    /// a glyph source built without variable-font support reads its outlines
+    /// as empty. Nothing says so — the window opens, the lines are the right
+    /// height, and there are no words in any of them — so it is said here.
+    /// See the note beside `ab_glyph` in `desktop/Cargo.toml`.
+    #[test]
+    fn the_faces_squint_draws_in_have_ink_in_them() {
+        for preferred in [MONO, UI] {
+            // A machine with none of them has nothing to check.
+            let Some((name, mut face)) = load(preferred) else {
+                continue;
+            };
+            let id = face.glyph_id('a').expect("every face here has an a");
+            let glyph = face.rasterise(id, 16).expect("and can draw it");
+            assert!(
+                glyph.coverage.iter().any(|&ink| ink > 0),
+                "{name} draws nothing"
+            );
+        }
+    }
+
     /// Every face offered is one that can then be loaded.
     #[test]
     fn every_choice_can_be_loaded() {
