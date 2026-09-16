@@ -195,8 +195,7 @@ fn read(path: &Path) -> Option<(String, Box<dyn GlyphSource>)> {
     Some((name, Box::new(source)))
 }
 
-/// Whether anything can be read in `face`: whether it draws a letter, a digit
-/// or a full stop rather than nothing at all.
+/// Whether there is any ink in `face`.
 ///
 /// A face can parse, report a glyph for a character, and still rasterise to an
 /// empty mask — a variable font read without variable-font support does
@@ -204,16 +203,28 @@ fn read(path: &Path) -> Option<(String, Box<dyn GlyphSource>)> {
 /// and every one of them is blank. Asking here costs one outline, once per
 /// face, and turns a window with no words in it into the next face down the
 /// list.
+///
+/// Only a face that has one of these characters and draws none of them is
+/// turned away. One that has none of them to ask about — a face of icons
+/// alone — is taken at its word: it is not a face to read a file in, but that
+/// is not the same as a face with nothing in it, and somebody may have chosen
+/// it knowing exactly what it is.
 fn draws(face: &mut TrueTypeSource) -> bool {
-    // A face with none of these in it is not one to read a file in, whatever
-    // else it holds: a face of icons alone is somebody's mistake.
-    ['n', '0', '.'].into_iter().any(|ch| {
-        face.contains(ch)
-            && face
-                .glyph_id(ch)
-                .and_then(|id| face.rasterise(id, INK))
-                .is_some_and(|glyph| glyph.coverage.iter().any(|&ink| ink > 0))
-    })
+    let mut asked = false;
+    for ch in ['n', '0', '.'] {
+        if !face.contains(ch) {
+            continue;
+        }
+        asked = true;
+        let inked = face
+            .glyph_id(ch)
+            .and_then(|id| face.rasterise(id, INK))
+            .is_some_and(|glyph| glyph.coverage.iter().any(|&ink| ink > 0));
+        if inked {
+            return true;
+        }
+    }
+    !asked
 }
 
 fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -340,3 +351,4 @@ mod tests {
         }
     }
 }
+
