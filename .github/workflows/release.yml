@@ -319,3 +319,54 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "squint $VERSION"
           git push
+
+  # The packages take their version from the tag, stamped into the manifest as
+  # they are built, so the manifest in the repository never learnt it: a build
+  # from a checkout called itself 0.1.0 in `squint --version`, in both About
+  # boxes, and in the key that remembers a machine whose GPU could not present.
+  # This writes the released version back to main, so a tree says what it last
+  # shipped as.
+  #
+  # Only a published release does this. A `workflow_dispatch` or a pull request
+  # builds `-dev.N` packages out of whatever the manifest says and must leave
+  # main alone.
+  manifest:
+    needs: [version, publish]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # Deep, because main may have moved and this may have to rebase.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Write the version main last shipped as
+        run: |
+          sed -i "0,/^version = .*/s//version = \"$VERSION\"/" desktop/Cargo.toml
+          # Cargo.lock carries the version too, and a lock that disagrees with
+          # its manifest fails every `--locked` build. `--workspace` rewrites
+          # the members of this workspace and leaves the dependencies alone.
+          cargo update --workspace --quiet
+          if git diff --quiet; then
+            echo "main already says $VERSION"
+            exit 0
+          fi
+          git diff
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: main says $VERSION, which is what it last shipped as"
+          # The packages take a while to build, so main may have moved since.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "main moved; rebasing onto it and trying again"
+            git pull --rebase origin main
+          done
+          echo "::error::could not write $VERSION to main"
+          exit 1
