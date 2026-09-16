@@ -6,6 +6,7 @@
 //! choose from.
 
 use denise_text::{GlyphSource, TrueTypeSource};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -37,6 +38,10 @@ fn user_dirs() -> Vec<PathBuf> {
     }
     dirs
 }
+
+/// The size a face is asked for a glyph at to find out whether it draws
+/// anything. Any size would do; this one is near what the chrome uses.
+const INK: u16 = 13;
 
 pub const MONO: &[&str] = &[
     // Fira Code's Nerd Font build first, where somebody has installed one: the
@@ -106,15 +111,21 @@ pub fn installed_names() -> &'static [String] {
     })
 }
 
+/// The first of `preferred` this machine has and can draw in.
+///
+/// Walks on past a face it cannot read, and past one it can read and not draw
+/// in, rather than stopping at the first file of the right name: a face that
+/// parses and has no ink in it would otherwise leave the window with nothing
+/// written anywhere in it.
 pub fn load(preferred: &[&str]) -> Option<(String, Box<dyn GlyphSource>)> {
-    let path = preferred.iter().find_map(|want| file_called(want))?;
-    read(&path)
+    preferred.iter().find_map(|want| read(&file_called(want)?))
 }
 
 /// The face `name` asks for: a file, if it is a path to one, and otherwise the
 /// face of that name among the ones installed — with or without the extension.
-/// `None` when there is no such face, or it cannot be read, so the caller can
-/// fall back to the list it would have used.
+/// `None` when there is no such face, or it cannot be read, or nothing can be
+/// drawn in it, so the caller can fall back to the list it would have used —
+/// and say that it did.
 pub fn load_named(name: &str) -> Option<(String, Box<dyn GlyphSource>)> {
     let as_file = Path::new(name);
     if as_file.is_file() {
@@ -123,14 +134,34 @@ pub fn load_named(name: &str) -> Option<(String, Box<dyn GlyphSource>)> {
     read(&file_called(name)?)
 }
 
-/// The faces of `preferred` this machine has, by the name the settings name
-/// them: the file's name without `.ttf`.
+/// The faces of `preferred` this machine has and can draw in, by the name the
+/// settings name them: the file's name without `.ttf`.
+///
+/// Only [`MONO`] and [`UI`] are asked for, which is what [`drawable`] holds.
 pub fn choices(preferred: &[&str]) -> Vec<String> {
     preferred
         .iter()
-        .filter(|want| file_called(want).is_some())
+        .filter(|want| file_called(want).is_some_and(|path| drawable().contains(&path)))
         .map(|want| stem_of(want))
         .collect()
+}
+
+/// Which of the faces squint looks for by itself this machine has and can
+/// draw in, found once.
+///
+/// Finding out costs reading the file, and the settings form asks again every
+/// time one of its rows changes, so the answer is kept. Opening a window does
+/// not ask — [`load`] reads the faces it needs and no others — so a squint
+/// that never opens the settings never pays for this.
+fn drawable() -> &'static HashSet<PathBuf> {
+    static DRAWABLE: OnceLock<HashSet<PathBuf>> = OnceLock::new();
+    DRAWABLE.get_or_init(|| {
+        MONO.iter()
+            .chain(UI)
+            .filter_map(|want| file_called(want))
+            .filter(|path| read(path).is_some())
+            .collect()
+    })
 }
 
 fn stem_of(file: &str) -> String {
@@ -152,11 +183,37 @@ fn file_called(want: &str) -> Option<PathBuf> {
         .cloned()
 }
 
+/// The face in `path`, or `None` where it is not one to draw in: a file that
+/// is not a font at all, or one that parses with no ink in it.
 fn read(path: &Path) -> Option<(String, Box<dyn GlyphSource>)> {
     let name = path.display().to_string();
     let bytes = std::fs::read(path).ok()?;
-    let source = TrueTypeSource::from_vec(&name, bytes).ok()?;
+    let mut source = TrueTypeSource::from_vec(&name, bytes).ok()?;
+    if !draws(&mut source) {
+        return None;
+    }
     Some((name, Box::new(source)))
+}
+
+/// Whether anything can be read in `face`: whether it draws a letter, a digit
+/// or a full stop rather than nothing at all.
+///
+/// A face can parse, report a glyph for a character, and still rasterise to an
+/// empty mask — a variable font read without variable-font support does
+/// exactly that. Nothing downstream notices: the lines are the right height
+/// and every one of them is blank. Asking here costs one outline, once per
+/// face, and turns a window with no words in it into the next face down the
+/// list.
+fn draws(face: &mut TrueTypeSource) -> bool {
+    // A face with none of these in it is not one to read a file in, whatever
+    // else it holds: a face of icons alone is somebody's mistake.
+    ['n', '0', '.'].into_iter().any(|ch| {
+        face.contains(ch)
+            && face
+                .glyph_id(ch)
+                .and_then(|id| face.rasterise(id, INK))
+                .is_some_and(|glyph| glyph.coverage.iter().any(|&ink| ink > 0))
+    })
 }
 
 fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -236,12 +293,35 @@ mod tests {
         }
     }
 
-    /// Every face offered is one that can then be loaded.
+    /// Every face offered is one that can then be loaded and drawn in.
     #[test]
     fn every_choice_can_be_loaded() {
-        for name in choices(MONO) {
-            assert!(load_named(&name).is_some(), "{name}");
+        for preferred in [MONO, UI] {
+            for name in choices(preferred) {
+                assert!(load_named(&name).is_some(), "{name}");
+            }
         }
+    }
+
+    /// A file that is not a face is not one to draw in, and a list of faces is
+    /// walked past the ones that cannot be used rather than stopped at the
+    /// first of the right name.
+    #[test]
+    fn a_face_that_cannot_be_drawn_in_is_walked_past() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let junk = dir.path().join("NotAFace.ttf");
+        std::fs::write(&junk, b"not a font at all").expect("written");
+        assert!(read(&junk).is_none(), "there is nothing to draw in it");
+        assert!(load_named(junk.to_str().expect("a path")).is_none());
+
+        // Machines without fonts have no list to walk.
+        let here = choices(MONO);
+        let Some(first) = here.first() else {
+            return;
+        };
+        let names = ["NoSuchFaceIsInstalledAnywhere.ttf", first.as_str()];
+        let (found, _) = load(&names).expect("the second of them");
+        assert_eq!(stem_of(&found), *first, "walked past the one that is not");
     }
 
     /// The faces offered are in order, each once, and each one loadable by the
