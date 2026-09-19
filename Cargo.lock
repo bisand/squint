@@ -2703,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "squint"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "arboard",
  "block2 0.6.2",
