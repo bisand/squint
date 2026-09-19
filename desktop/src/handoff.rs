@@ -17,11 +17,17 @@ use denise_winit::Waker;
 use interprocess::local_socket::{ListenerOptions, Name, Stream, prelude::*};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
 
 /// Files waiting for the window, oldest first.
 static OPENED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Signalled whenever files join the queue. The window does not wait on it —
+/// it is woken by `WAKER` and takes what is there between frames — but
+/// anybody who must wait for an arrival can do so on this rather than by
+/// asking the queue again and again against a clock.
+static ARRIVED: Condvar = Condvar::new();
 
 /// Wakes the window when files arrive, once there is a window to wake.
 static WAKER: OnceLock<Waker> = OnceLock::new();
@@ -37,6 +43,7 @@ pub fn push(paths: impl IntoIterator<Item = PathBuf>) {
     if let Ok(mut opened) = OPENED.lock() {
         opened.extend(paths);
     }
+    ARRIVED.notify_all();
     if let Some(waker) = WAKER.get() {
         waker.wake();
     }
@@ -210,7 +217,7 @@ fn address() -> Option<Address> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     #[test]
     fn a_second_squint_hands_its_files_to_the_first() {
@@ -230,13 +237,20 @@ mod tests {
         );
         assert_eq!(claim_at(&address, &files), Claim::HandedOver);
 
-        let until = Instant::now() + Duration::from_secs(5);
-        let mut got = Vec::new();
-        while got.len() < files.len() && Instant::now() < until {
-            got.extend(take());
-            thread::sleep(Duration::from_millis(10));
+        // The listener took the files on its own thread, so wait to be told
+        // it has rather than asking the queue until a clock runs out: on a
+        // machine busy enough, that thread may not be scheduled before any
+        // deadline worth writing down. The timeout here is only so a thread
+        // that never arrives fails the test instead of hanging it.
+        let mut opened = OPENED.lock().unwrap();
+        while opened.len() < files.len() {
+            let (next, timed_out) = ARRIVED
+                .wait_timeout(opened, Duration::from_secs(60))
+                .unwrap();
+            assert!(!timed_out.timed_out(), "the listener never took the files");
+            opened = next;
         }
-        assert_eq!(got, files);
+        assert_eq!(std::mem::take(&mut *opened), files);
     }
 
     #[test]
