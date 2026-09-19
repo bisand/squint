@@ -9,7 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
 dependencies = [
  "ab_glyph_rasterizer",
- "libm",
  "owned_ttf_parser",
 ]
 
@@ -18,9 +17,6 @@ name = "ab_glyph_rasterizer"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
-dependencies = [
- "libm",
-]
 
 [[package]]
 name = "adler2"
@@ -629,18 +625,15 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "denise"
-version = "0.30.1"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da20a9ca1e1680272c021d29f487e2b018ddc6e07f299d6a7f8dd9a4aff3d0da"
-dependencies = [
- "thiserror 2.0.20",
-]
+checksum = "cc371abbd4d008a4224ff5947961711998f01bedb3311ae785c6e909c18ef410"
 
 [[package]]
 name = "denise-macos"
-version = "0.30.1"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4bd7a79d6596da6e41f802986ff8e09a3ae15103c94a01290cf645afecd9ac3"
+checksum = "ced88c01cc34ca3cf8ff81ee1ec43c892bdbd8f61efc925d4e5ba1d02dc98e7e"
 dependencies = [
  "denise",
  "objc2 0.6.4",
@@ -650,46 +643,44 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-io-surface",
  "objc2-quartz-core 0.3.2",
- "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "denise-render"
-version = "0.30.1"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc9d0ba53b710d9a1ff8fbe5250ceafdc17df49e20c6e3bce42337908e17e47a"
+checksum = "137281b4eeaf505e802be5456abdfc80e56ab240985f93bbcbb43817b4ade0ad"
 dependencies = [
  "denise",
 ]
 
 [[package]]
 name = "denise-text"
-version = "0.30.1"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52b6e11a4dd5cd6d93a8a065dbbeeb9a0c51ac658d8cecb739d887b7b46a4cb4"
+checksum = "a74b7ebcc16d810f4cf96ce0db79661a26f00d19fd60dbddd2ddef3abd8d42c3"
 dependencies = [
- "ab_glyph",
  "denise",
  "denise-render",
+ "skrifa",
 ]
 
 [[package]]
 name = "denise-ui"
-version = "0.30.1"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9659e1d266a49133cc2c4020f56a1291e2d20dfaef1bc57249e41dea23375829"
+checksum = "eb9f9c89d8c674efd921623398bdeb682752b2807fc18ab6c48f973ec3e408c2"
 dependencies = [
  "denise",
  "denise-render",
  "denise-text",
- "slotmap",
 ]
 
 [[package]]
 name = "denise-wgpu"
-version = "0.30.1"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42bc0e343323871ccdb3421e8e77bca2a23647cca362fea42df1de51eeda39b5"
+checksum = "29a6533a59b7e4ffc257beea40fb844b8809271f582e91939d002efa46f864b0"
 dependencies = [
  "bytemuck",
  "denise",
@@ -700,9 +691,9 @@ dependencies = [
 
 [[package]]
 name = "denise-winit"
-version = "0.30.1"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebafcb9ef2740b9c98bcd58d2a7e6b1148b1aa5e7f5d8a99aa209e079afec52a"
+checksum = "cf53bb0b0859e78ea7db92b9f7d775804d660f7f3dcd28c6d31cd10846786dd8"
 dependencies = [
  "denise",
  "denise-macos",
@@ -715,7 +706,6 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "pollster 1.0.1",
  "softbuffer",
- "thiserror 2.0.20",
  "wgpu",
  "winit",
 ]
@@ -975,6 +965,15 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "font-types"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8eb065f3251655b3c90e22e5e363f310fc5332fb3402e37bbc94752283248f6"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "foreign-types"
@@ -2314,6 +2313,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "read-fonts"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
+dependencies = [
+ "bytemuck",
+ "core_maths",
+ "font-types",
+ "once_cell",
+]
+
+[[package]]
 name = "recvmsg"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2582,6 +2593,17 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "skrifa"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
+dependencies = [
+ "bytemuck",
+ "core_maths",
+ "read-fonts",
+]
 
 [[package]]
 name = "slab"
@@ -2957,9 +2979,6 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
-dependencies = [
- "core_maths",
-]
 
 [[package]]
 name = "uds_windows"
