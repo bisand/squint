@@ -1,13 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0.35" y2="1">
-      <stop offset="0" stop-color="#383F51"/>
-      <stop offset="1" stop-color="#20232E"/>
-    </linearGradient>
     <!-- The left brace; the right one is this mirrored, so one curve serves both. -->
     <path id="brace" d="M 430 236 C 352 236 368 332 368 400 C 368 462 344 500 300 512 C 344 524 368 562 368 624 C 368 692 352 788 430 788"/>
   </defs>
-  <rect width="1024" height="1024" rx="232" fill="url(#tile)"/>
+  <!-- Flat: CoreGraphics dithers a gradient, and dithered noise will not compress. -->
+  <rect width="1024" height="1024" rx="232" fill="#2C3140"/>
   <g fill="none" stroke="#DCE1EB" stroke-width="72" stroke-linecap="round" stroke-linejoin="round">
     <use href="#brace" transform="translate(-90,0)"/>
     <use href="#brace" transform="translate(1114,0) scale(-1,1)"/>
