@@ -134,7 +134,10 @@ jobs:
 
   macos:
     needs: version
-    runs-on: macos-14
+    # Pinned, like the Linux and Windows runners. macos-14 is retired on
+    # 2026-11-02; the deployment target below is what decides how far back
+    # the build runs, not the runner's own version.
+    runs-on: macos-15
     env:
       VERSION: ${{ needs.version.outputs.version }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
