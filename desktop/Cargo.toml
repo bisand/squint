@@ -44,3 +44,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # To hear the files Finder hands squint, and to be the default for some: see
 # `open_documents` and `defaults`.
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSBundle", "NSError", "NSNotification", "NSString", "NSURL"] }
+
+# Puts squint.ico into the .exe, which is the only place Windows looks for
+# an application's icon: see build.rs.
+[build-dependencies]
+winresource = "0.1.34"
