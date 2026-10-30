@@ -1952,6 +1952,24 @@ impl App {
             .map(|name| format!("no face called {name} on this machine: drawing in another"))
     }
 
+    /// The window has moved to a display of another DPI — docked, undocked,
+    /// dragged across. Everything sized in physical pixels is sized again from
+    /// the new factor, which is what the settings already do: the zoom is the
+    /// one thing the settings would reset, so it is put back.
+    fn rescale(&mut self, scale: f32) {
+        if scale <= 0.0 || (scale - self.scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.scale = scale;
+        let zoom = self.text_size;
+        let _ = self.apply_settings();
+        if self.text_size != zoom {
+            self.text_size = zoom;
+            let style = self.editor_style();
+            self.each_editor(|area| area.set_style(style));
+        }
+    }
+
     /// Whether a document should be coloured: the settings say so, and it is
     /// not bigger than they allow.
     fn syntax_wanted(&self, doc: &FileDocument) -> bool {
@@ -2851,6 +2869,7 @@ impl DeniseApp for App {
                         logical(size.width, *scale_factor),
                         logical(size.height, *scale_factor),
                     );
+                    self.rescale(*scale_factor);
                 }
                 InputEvent::SurfaceMoved {
                     position,
@@ -3147,6 +3166,39 @@ mod tests {
             ],
             &mut damage,
         );
+    }
+
+    /// Docked and undocked: the display's DPI changes under a window that is
+    /// already open, and the text is drawn at the new one without a restart.
+    /// The zoom survives it — it is not a setting, and re-applying them would
+    /// otherwise put it back to the size the settings name.
+    #[test]
+    fn a_window_follows_the_dpi_of_the_display_it_is_on() {
+        let mut app = window(Kept::in_memory(Settings::default()));
+        app.open_path(Path::new("Cargo.toml"));
+        app.zoom(1);
+        let zoomed = app.text_size;
+        let before = app.editor_style().size_px;
+
+        shaped(
+            &mut app,
+            Size::new(2400, 1600),
+            2.0,
+            Point::new(0, 0),
+            false,
+        );
+        assert_eq!(app.scale, 2.0);
+        assert_eq!(app.text_size, zoomed, "the zoom is kept across the move");
+        assert_eq!(app.editor_style().size_px, before * 2, "drawn twice as big");
+        assert!(
+            app.chrome.size_px > 13,
+            "and so is the chrome: {:?}",
+            app.chrome
+        );
+
+        // And back to the laptop's own display.
+        shaped(&mut app, Size::new(1200, 800), 1.0, Point::ZERO, false);
+        assert_eq!(app.editor_style().size_px, before);
     }
 
     /// A window is kept in the pixels that mean the same thing on the next
