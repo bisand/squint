@@ -1,12 +1,16 @@
 #!/bin/sh
-# Renders packaging/icons/squint.svg into every icon the packagers install.
+# Renders one of packaging/icons/variants into every icon the packagers install.
+#
+# The variant to use is the argument, and the default is the one squint ships:
+#   ./packaging/icons/make-icons.sh underscore
 set -e
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/packaging/icons"
+variant=${1:-caret}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-swift "$out/render.swift" "$out/squint.svg" "$tmp" 16 32 48 64 128 256 512 1024
+swift "$out/render.swift" "$out/variants/$variant.svg" "$tmp" 16 32 48 64 128 256 512 1024
 
 cp "$tmp/1024.png" "$out/squint.png"
 cp "$tmp/256.png" "$out/squint-256.png"

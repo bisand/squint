@@ -9,5 +9,8 @@
     <use href="#brace" transform="translate(-90,0)"/>
     <use href="#brace" transform="translate(1114,0) scale(-1,1)"/>
   </g>
-  <circle cx="512" cy="512" r="66" fill="#F2C14E"/>
+  <!-- The caret carries the braces' own stroke width: thinner than this and
+       a 16 px icon renders it across two pixel columns, half covered each,
+       which turns the amber olive. -->
+  <path d="M 512 416 V 608" fill="none" stroke="#F2C14E" stroke-width="72" stroke-linecap="round"/>
 </svg>
