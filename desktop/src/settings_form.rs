@@ -116,6 +116,7 @@ enum Field {
     ThemeChoice,
     TextFont,
     TextSize,
+    LineHeight,
     UiFont,
     UiSize,
     ThemeName,
@@ -754,6 +755,7 @@ impl Form {
             theme,
             text_font,
             text_size,
+            line_height,
             ui_font,
             ui_size,
             ..
@@ -832,6 +834,13 @@ impl Form {
             "Text size",
             "Logical pixels, and where ⌘0 comes back to. Between 6 and 64.",
             text_size.to_string(),
+        );
+        self.text(
+            ui,
+            Field::LineHeight,
+            "Line height",
+            "A percentage of the face's own line, between 100 and 200.",
+            line_height.to_string(),
         );
         let chrome = self.font_options(fonts::UI, ui_font.as_deref());
         let chosen = font_chosen(&chrome, ui_font.as_deref());
@@ -1382,6 +1391,10 @@ fn set_text(settings: &mut Settings, field: Field, text: String) {
         Field::TextSize => {
             settings.appearance.text_size =
                 number(settings.appearance.text_size as u64).min(1000) as u16;
+        }
+        Field::LineHeight => {
+            settings.appearance.line_height =
+                number(settings.appearance.line_height as u64).min(1000) as u16;
         }
         Field::UiSize => {
             settings.appearance.ui_size =

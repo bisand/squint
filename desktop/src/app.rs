@@ -812,6 +812,7 @@ impl App {
             .with_gutter(self.gutter)
             .with_read_only(read_only)
             .with_smooth_scroll(smooth_scroll)
+            .with_line_height(self.memory.settings.get().appearance.line_height)
             .with_change(Msg::Changed)
             .with_clipboard(Msg::Clipboard);
         let root = self.ui.root();
@@ -1926,6 +1927,7 @@ impl App {
         let style = self.editor_style();
         let gutter = self.gutter;
         let smooth_scroll = settings.editor.smooth_scroll;
+        let line_height = settings.appearance.line_height;
         let tabs: Vec<(NodeId, u8)> = self
             .tabs
             .iter()
@@ -1940,6 +1942,7 @@ impl App {
                 area.set_gutter(gutter);
                 area.set_tab_width(tab_width);
                 area.set_smooth_scroll(smooth_scroll);
+                area.set_line_height(line_height);
                 // Even when nothing about the highlighting changed: the theme
                 // may have, and colours already parsed were parsed with the
                 // old one.

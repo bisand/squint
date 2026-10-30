@@ -103,6 +103,9 @@ pub struct Appearance {
     pub text_font: Option<String>,
     /// Its size in logical pixels, which Zoom In and Zoom Out step from.
     pub text_size: u16,
+    /// How tall a line of the text is as a percentage of the face's own line
+    /// height: 100 is the face's, and more is air between the lines.
+    pub line_height: u16,
     /// The face the menus, tabs and status line are drawn in.
     pub ui_font: Option<String>,
     pub ui_size: u16,
@@ -242,6 +245,9 @@ impl Default for Appearance {
             custom_themes: Vec::new(),
             text_font: None,
             text_size: 13,
+            // Fira Code's own line is 1.15 of its size, which is tight for a
+            // screenful of code; an editor usually gives it about 1.4.
+            line_height: 135,
             ui_font: None,
             ui_size: 13,
         }
@@ -300,6 +306,7 @@ impl Settings {
         self.general.watch_seconds = self.general.watch_seconds.clamp(1, 60);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
         self.appearance.text_size = self.appearance.text_size.clamp(6, 64);
+        self.appearance.line_height = self.appearance.line_height.clamp(100, 200);
         self.appearance.ui_size = self.appearance.ui_size.clamp(8, 32);
         self.highlighting.max_mb = self.highlighting.max_mb.clamp(1, 4096);
         self.formatting.indent_size = self.formatting.indent_size.clamp(1, 16);
@@ -532,11 +539,29 @@ mod tests {
     #[test]
     fn a_value_out_of_range_is_brought_back_into_it() {
         let settings: Settings = serde_json::from_str(
-            r#"{"editor": {"tab_width": 200}, "appearance": {"text_size": 900}}"#,
+            r#"{"editor": {"tab_width": 200}, "appearance": {"text_size": 900, "line_height": 20}}"#,
         )
         .expect("json");
         assert_eq!(settings.editor.tab_width, 16);
         assert_eq!(settings.appearance.text_size, 64);
+        assert_eq!(
+            settings.appearance.line_height, 100,
+            "lines shorter than the face's own would be drawn over each other"
+        );
+    }
+
+    /// A settings file written before line height was a setting reads as the
+    /// roomier default rather than as nothing.
+    #[test]
+    fn a_file_from_before_line_height_still_has_one() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"appearance": {"text_size": 14}}"#).expect("json");
+        let settings = settings.sane();
+        assert_eq!(settings.appearance.text_size, 14);
+        assert_eq!(
+            settings.appearance.line_height,
+            Appearance::default().line_height
+        );
     }
 
     /// A custom theme is the theme it names, and a name nobody knows is dark.

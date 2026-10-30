@@ -202,9 +202,11 @@ ones it opened with, so what Save writes is what it showed.
 - **Editor** — line numbers, tab stops and whether they come from the file's
   project's `.editorconfig`, whether files open read only, and whether the
   wheel scrolls the text a pixel at a time or a line at a time.
-- **Appearance** — the theme, the face the text is drawn in and its size, and
-  the face and size of the menus, tabs and status line, which are chosen
-  separately from the text's. Each face dropdown offers the faces squint
+- **Appearance** — the theme, the face the text is drawn in, its size and how
+  tall a line of it is, and the face and size of the menus, tabs and status
+  line, which are chosen separately from the text's. Line height is a
+  percentage of the face's own line: 135 by default, where Fira Code's own
+  would be 115, which is tight for a screenful of code. Each face dropdown offers the faces squint
   reaches for by itself first, then every face installed on the machine, in
   order — the list scrolls — and Choose a File… takes any TrueType or
   OpenType file, wherever it is. Themes are DeniseUI's `dark`, `light` and
